@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Maria Visegan — Scrum Master Toolkit</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&family=Public+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#EDF0EF;
+    --ink:#1C2333;
+    --ink-soft:#4A5568;
+    --line:#D3D9D7;
+    --card:#FFFFFF;
+    --teal:#2F7A6E;
+    --teal-soft:#E4EFEC;
+    --amber:#C98A2C;
+    --amber-soft:#FBF0DF;
+    --mono:'IBM Plex Mono', monospace;
+    --sans:'Public Sans', -apple-system, sans-serif;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    background:var(--paper);
+    color:var(--ink);
+    font-family:var(--sans);
+    line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{
+    max-width:840px;
+    margin:0 auto;
+    padding:64px 24px 96px;
+  }
+  .eyebrow{
+    font-family:var(--mono);
+    font-size:12px;
+    letter-spacing:0.14em;
+    text-transform:uppercase;
+    color:var(--teal);
+    font-weight:600;
+    margin:0 0 14px;
+  }
+  h1{
+    font-size:clamp(32px, 5vw, 46px);
+    line-height:1.1;
+    margin:0 0 18px;
+    letter-spacing:-0.01em;
+  }
+  .lede{
+    font-size:17px;
+    color:var(--ink-soft);
+    max-width:56ch;
+    margin:0 0 48px;
+  }
+  .board{
+    display:flex;
+    flex-direction:column;
+    gap:18px;
+    margin-bottom:56px;
+  }
+  .ticket{
+    display:block;
+    background:var(--card);
+    border:1px solid var(--line);
+    border-radius:10px;
+    padding:26px 28px;
+    text-decoration:none;
+    color:inherit;
+    transition:transform .15s ease, box-shadow .15s ease, border-color .15s ease;
+    position:relative;
+  }
+  .ticket:hover{
+    transform:translateY(-2px);
+    box-shadow:0 8px 24px rgba(28,35,51,0.08);
+    border-color:var(--teal);
+  }
+  .ticket:focus-visible{
+    outline:2px solid var(--teal);
+    outline-offset:3px;
+  }
+  .ticket-top{
+    display:flex;
+    align-items:center;
+    gap:12px;
+    margin-bottom:10px;
+  }
+  .ticket-id{
+    font-family:var(--mono);
+    font-size:12px;
+    font-weight:600;
+    color:var(--ink-soft);
+    letter-spacing:0.04em;
+  }
+  .status{
+    font-family:var(--mono);
+    font-size:11px;
+    font-weight:600;
+    letter-spacing:0.06em;
+    text-transform:uppercase;
+    padding:3px 10px;
+    border-radius:20px;
+  }
+  .status.live{ background:var(--teal-soft); color:var(--teal); }
+  .status.build{ background:var(--amber-soft); color:var(--amber); }
+  .ticket h2{
+    font-size:21px;
+    margin:0 0 8px;
+  }
+  .ticket p{
+    font-size:15px;
+    color:var(--ink-soft);
+    margin:0 0 14px;
+    max-width:60ch;
+  }
+  .tags{
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px;
+    margin-bottom:16px;
+  }
+  .tag{
+    font-family:var(--mono);
+    font-size:11px;
+    color:var(--ink-soft);
+    background:var(--paper);
+    border:1px solid var(--line);
+    padding:3px 9px;
+    border-radius:5px;
+  }
+  .open{
+    font-family:var(--mono);
+    font-size:13px;
+    font-weight:600;
+    color:var(--teal);
+  }
+  .open::after{
+    content:" →";
+  }
+  footer{
+    border-top:1px solid var(--line);
+    padding-top:24px;
+    font-size:14px;
+    color:var(--ink-soft);
+    display:flex;
+    justify-content:space-between;
+    flex-wrap:wrap;
+    gap:8px;
+  }
+  footer a{ color:var(--ink); font-weight:600; text-decoration:none; }
+  footer a:hover{ color:var(--teal); }
+  @media (prefers-reduced-motion: reduce){
+    .ticket{ transition:none; }
+  }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <p class="eyebrow">Backlog — Portfolio</p>
+    <h1>Two working tools, built to run real Scrum practice.</h1>
+    <p class="lede">18+ years in automotive software quality, now applied to Agile facilitation and delivery. These aren't mockups — they're interactive dashboards you can click through and use.</p>
+
+    <div class="board">
+      <a class="ticket" href="scrum-master-dashboard.html">
+        <div class="ticket-top">
+          <span class="ticket-id">SM-01</span>
+          <span class="status live">Live</span>
+        </div>
+        <h2>Scrum Master Toolkit</h2>
+        <p>A working reference for running the role day to day: impediment tracking, coaching prompts, stakeholder mapping, servant-leadership checks, and sprint health metrics — all in one self-contained dashboard.</p>
+        <div class="tags">
+          <span class="tag">Facilitation</span>
+          <span class="tag">Coaching</span>
+          <span class="tag">Team health</span>
+        </div>
+        <span class="open">Open dashboard</span>
+      </a>
+
+      <a class="ticket" href="sprint-health-governance-dashboard.html">
+        <div class="ticket-top">
+          <span class="ticket-id">SM-02</span>
+          <span class="status live">Live</span>
+        </div>
+        <h2>Sprint Health &amp; Governance</h2>
+        <p>Sprint-level reporting that bridges Agile and traditional delivery tracking: cumulative flow, estimation accuracy, Definition of Done adherence, and earned-value style forecasting.</p>
+        <div class="tags">
+          <span class="tag">CFD</span>
+          <span class="tag">Earned value</span>
+          <span class="tag">DoD tracking</span>
+        </div>
+        <span class="open">Open dashboard</span>
+      </a>
+    </div>
+
+    <footer>
+      <span>Maria Visegan — Timișoara, Romania</span>
+      <a href="mailto:viseganmaria@gmail.com">viseganmaria@gmail.com</a>
+    </footer>
+  </div>
+</body>
+</html>
