@@ -1,0 +1,2642 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Sprint Health &amp; Governance Dashboard</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        fontFamily: { sans: ['Inter', 'Segoe UI', 'ui-sans-serif', 'system-ui', 'sans-serif'] },
+      },
+    },
+  };
+</script>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+<style>
+  body { font-feature-settings: "tnum" 1; }
+  .num { font-variant-numeric: tabular-nums; }
+  ::-webkit-scrollbar { height: 9px; width: 9px; }
+  ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  input[type="number"] { -moz-appearance: textfield; }
+
+  /* Print: drop the chrome, keep the numbers. Only the open tab is on screen,
+     so only the open tab prints. */
+  .print-only { display: none; }
+  @media print {
+    @page { margin: 12mm; }
+    .no-print { display: none !important; }
+    .print-only { display: block !important; }
+    body { background: #fff !important; }
+    main { padding: 0 !important; }
+    section { break-inside: avoid; box-shadow: none !important; border-color: #cbd5e1 !important; }
+    table { break-inside: auto; }
+    tr { break-inside: avoid; }
+    input, select, textarea {
+      border: 0 !important; background: transparent !important; padding: 0 !important;
+      color: #0f172a !important; -webkit-appearance: none; appearance: none;
+    }
+    input[type="date"]::-webkit-calendar-picker-indicator,
+    input[type="datetime-local"]::-webkit-calendar-picker-indicator { display: none; }
+  }
+</style>
+</head>
+<body class="bg-slate-100 text-slate-800 font-sans">
+<div id="root" class="min-h-screen"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo } = React;
+
+/* ==========================================================================
+   SPRINT HEALTH & GOVERNANCE DASHBOARD
+   Single file, no build step, no persistence — every bit of state lives in
+   React and resets on reload. Sample data is seeded once at mount so all six
+   tabs are demoable immediately.
+   ========================================================================== */
+
+/* ================================ helpers ================================= */
+
+const uid = (p) => p + '-' + Math.random().toString(36).slice(2, 8);
+const pad = (n) => String(n).padStart(2, '0');
+const toISO = (d) => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+
+const TODAY = new Date();
+TODAY.setHours(0, 0, 0, 0);
+const TODAY_ISO = toISO(TODAY);
+
+/** ISO date n calendar days before today. */
+const ago = (n) => {
+  const d = new Date(TODAY);
+  d.setDate(d.getDate() - n);
+  return toISO(d);
+};
+/** ISO datetime n days ago at HH:MM. */
+const agoAt = (n, hhmm) => ago(n) + 'T' + hhmm;
+/**
+ * Same as ago(), but stepped back to the nearest weekday. Sample dates are
+ * relative to whenever the file is opened, so without this a seeded story
+ * could start and finish on a Saturday and read as a zero-day cycle.
+ */
+const agoWeekday = (n) => {
+  const d = new Date(TODAY);
+  d.setDate(d.getDate() - n);
+  while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() - 1);
+  return toISO(d);
+};
+
+const parseISO = (s) => {
+  const [y, m, d] = String(s).slice(0, 10).split('-').map(Number);
+  return new Date(y, (m || 1) - 1, d || 1);
+};
+const calDays = (a, b) => Math.round((parseISO(b) - parseISO(a)) / 86400000);
+
+/** Business days from a to b, both ends counted. Mon to Wed = 3. */
+const workingDays = (a, b) => {
+  const cur = parseISO(a);
+  const end = parseISO(b);
+  if (end < cur) return 0;
+  let n = 0;
+  while (cur <= end) {
+    const w = cur.getDay();
+    if (w !== 0 && w !== 6) n++;
+    cur.setDate(cur.getDate() + 1);
+  }
+  return n;
+};
+
+/** Every calendar day from a to b inclusive, as ISO strings. */
+const dayRange = (a, b) => {
+  const out = [];
+  const cur = parseISO(a);
+  const end = parseISO(b);
+  while (cur <= end) {
+    out.push(toISO(cur));
+    cur.setDate(cur.getDate() + 1);
+  }
+  return out;
+};
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const shortDate = (iso) => {
+  const d = parseISO(iso);
+  return d.getDate() + ' ' + MONTHS[d.getMonth()];
+};
+const shortDateTime = (s) => shortDate(s) + ', ' + (String(s).split('T')[1] || '').slice(0, 5);
+
+const round1 = (n) => Math.round(n * 10) / 10;
+const round2 = (n) => Math.round(n * 100) / 100;
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+const sum = (a) => a.reduce((s, x) => s + x, 0);
+const avg = (a) => (a.length ? sum(a) / a.length : 0);
+
+const upd = (arr, id, patch) =>
+  arr.map((x) => (x.id === id ? { ...x, ...(typeof patch === 'function' ? patch(x) : patch) } : x));
+const rm = (arr, id) => arr.filter((x) => x.id !== id);
+
+const FIB = [1, 2, 3, 5, 8, 13];
+
+/* ================================ UI atoms ================================ */
+
+const inputCls = 'rounded border border-slate-300 bg-white px-2 py-1 text-sm text-slate-700 focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500';
+const btnCls = 'no-print rounded-md border border-slate-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50';
+const btnPrimary = 'no-print rounded-md border border-teal-600 bg-teal-600 px-2.5 py-1 text-xs font-semibold text-white hover:bg-teal-700';
+const toolBtnCls = 'inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-[12px] font-medium text-slate-600 hover:border-teal-400 hover:bg-teal-50 hover:text-teal-800';
+
+function Card({ title, right, children, className = '' }) {
+  return (
+    <section className={'rounded-lg border border-slate-200 bg-white shadow-sm ' + className}>
+      {(title || right) && (
+        <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-3 py-2">
+          <h2 className="text-[13px] font-semibold uppercase tracking-wide text-slate-500">{title}</h2>
+          <div className="flex flex-wrap items-center gap-2">{right}</div>
+        </header>
+      )}
+      {children}
+    </section>
+  );
+}
+
+const TONE = {
+  slate: { box: 'border-slate-200 bg-white', value: 'text-slate-800', label: 'text-slate-500' },
+  teal: { box: 'border-teal-200 bg-teal-50', value: 'text-teal-800', label: 'text-teal-700' },
+  red: { box: 'border-red-300 bg-red-50', value: 'text-red-700', label: 'text-red-600' },
+  amber: { box: 'border-amber-300 bg-amber-50', value: 'text-amber-700', label: 'text-amber-600' },
+  green: { box: 'border-emerald-300 bg-emerald-50', value: 'text-emerald-700', label: 'text-emerald-600' },
+};
+
+function StatCard({ label, value, sub, tone = 'slate' }) {
+  const t = TONE[tone] || TONE.slate;
+  return (
+    <div className={'rounded-lg border px-3 py-2.5 shadow-sm ' + t.box}>
+      <div className={'text-[11px] font-semibold uppercase tracking-wide ' + t.label}>{label}</div>
+      <div className={'num mt-0.5 text-2xl font-bold leading-tight ' + t.value}>{value}</div>
+      {sub && <div className="mt-0.5 text-[11px] leading-snug text-slate-500">{sub}</div>}
+    </div>
+  );
+}
+
+/** Double-click to edit, Enter or blur to save, Escape to cancel. */
+function Editable({ value, onChange, className = '', multiline = false, placeholder = 'empty' }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+  useEffect(() => { if (!editing) setDraft(value); }, [value, editing]);
+
+  if (!editing) {
+    return (
+      <span
+        title="Double-click to edit"
+        onDoubleClick={() => { setDraft(value); setEditing(true); }}
+        className={'cursor-text rounded hover:bg-slate-100 ' + className}
+      >
+        {value || <span className="italic text-slate-300">{placeholder}</span>}
+      </span>
+    );
+  }
+  const commit = () => { onChange(String(draft).trim()); setEditing(false); };
+  const key = (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); setEditing(false); }
+    if (e.key === 'Enter' && (!multiline || e.metaKey || e.ctrlKey)) { e.preventDefault(); commit(); }
+  };
+  if (multiline) {
+    return (
+      <textarea
+        autoFocus rows={3} value={draft}
+        onChange={(e) => setDraft(e.target.value)} onBlur={commit} onKeyDown={key}
+        className={inputCls + ' w-full resize-y'}
+      />
+    );
+  }
+  return (
+    <input
+      autoFocus value={draft}
+      onChange={(e) => setDraft(e.target.value)} onBlur={commit} onKeyDown={key}
+      className={inputCls + ' w-full'}
+    />
+  );
+}
+
+function NumField({ value, onChange, step = 1, min, width = 'w-24', suffix }) {
+  return (
+    <span className="inline-flex items-center gap-1">
+      <input
+        type="number" value={value} step={step} min={min}
+        onChange={(e) => onChange(e.target.value === '' ? 0 : Number(e.target.value))}
+        className={inputCls + ' num text-right ' + width}
+      />
+      {suffix && <span className="text-[11px] text-slate-400">{suffix}</span>}
+    </span>
+  );
+}
+
+function XBtn({ onClick, title = 'Remove' }) {
+  return (
+    <button onClick={onClick} title={title} className="no-print rounded px-1 leading-none text-slate-300 hover:bg-red-50 hover:text-red-600">
+      &#10005;
+    </button>
+  );
+}
+
+const CHIP_TONE = {
+  slate: 'border-slate-200 bg-slate-100 text-slate-600',
+  teal: 'border-teal-200 bg-teal-50 text-teal-700',
+  red: 'border-red-200 bg-red-50 text-red-700',
+  amber: 'border-amber-200 bg-amber-50 text-amber-700',
+  green: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+};
+
+function Chip({ children, tone = 'slate', onClick, title, className = '' }) {
+  return (
+    <span
+      onClick={onClick}
+      title={title}
+      className={
+        'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium ' +
+        CHIP_TONE[tone] + (onClick ? ' cursor-pointer select-none hover:brightness-95' : '') + ' ' + className
+      }
+    >
+      {children}
+    </span>
+  );
+}
+
+function FootNote({ children }) {
+  return (
+    <p className="border-t border-slate-200 pt-3 text-[11px] leading-relaxed text-slate-400">
+      <span className="font-semibold uppercase tracking-wide">Modelling note — </span>
+      {children}
+    </p>
+  );
+}
+
+function Empty({ children }) {
+  return <div className="px-3 py-8 text-center text-[13px] text-slate-400">{children}</div>;
+}
+
+function PageHead({ title, lead, right }) {
+  return (
+    <header className="flex flex-wrap items-end justify-between gap-3">
+      <div>
+        <h1 className="text-xl font-bold tracking-tight text-slate-900">{title}</h1>
+        <p className="mt-1 max-w-[70ch] text-[13px] leading-relaxed text-slate-500">{lead}</p>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">{right}</div>
+    </header>
+  );
+}
+
+/* ============================== chart atoms =============================== */
+
+const AXIS = '#cbd5e1';
+const GRID = '#e2e8f0';
+const TICK = '#94a3b8';
+
+/** Tick values from 0 to at least max, on a 1 / 2 / 2.5 / 5 step. */
+function niceTicks(max, count = 5) {
+  if (!(max > 0)) return [0, 1];
+  const raw = max / count;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= raw) || mag * 10;
+  const out = [];
+  for (let v = 0; v <= max + step * 0.0001; v += step) out.push(round2(v));
+  return out;
+}
+
+function Legend({ items }) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 pt-2 text-[11px] text-slate-500">
+      {items.map((it) => (
+        <span key={it.label} className="inline-flex items-center gap-1.5">
+          <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: it.color }} />
+          {it.label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/* ==========================================================================
+   TAB 1 — RETROSPECTIVE
+   Three-column retro board per sprint, plus a recurrence view that looks
+   across sprints for action items that keep coming back.
+   ========================================================================== */
+
+const it = (text, votes) => ({ id: uid('i'), text, votes });
+const act = (text, owner, status) => ({ id: uid('a'), text, owner, status, votes: 0 });
+
+const SEED_RETRO = [
+  {
+    id: 'SP-22',
+    name: 'Sprint 22',
+    wentWell: [
+      it('Pairing on the payments refactor cut review time roughly in half', 5),
+      it('Demo environment stayed up for the whole sprint review', 3),
+      it('New joiner shipped their first story on day 3', 2),
+    ],
+    wentWrong: [
+      it('CI pipeline flaky — six red builds that went green on a plain retry', 7),
+      it('"Export order history to CSV" carried over into a third sprint', 4),
+      it('On-call rota handover was never picked up on the Friday', 2),
+    ],
+    actions: [
+      act('Quarantine the flaky CI tests and track them on the board', 'Dana', 'open'),
+      act('Split any carry-over story below 5 points before committing to it', 'Radu', 'in-progress'),
+    ],
+  },
+  {
+    id: 'SP-23',
+    name: 'Sprint 23',
+    wentWell: [
+      it('Refinement with the PO before planning meant zero mid-sprint scope changes', 6),
+      it('Release notes are now generated from the merged PR titles', 4),
+      it('Blocker on the VAT rules was raised on day 1 instead of day 6', 2),
+    ],
+    wentWrong: [
+      it('Flaky CI builds again — the quarantine list was never actually enforced', 8),
+      it('Staging data reset wiped the QA test accounts mid-sprint', 5),
+      it('Two stories sat blocked waiting on the design handoff', 3),
+    ],
+    actions: [
+      act('Enforce the flaky CI quarantine list in the pipeline config', 'Dana', 'open'),
+      act('Ask design for handoff assets one sprint ahead', 'Ioana', 'done'),
+      act('Snapshot the staging QA accounts before every reset', 'Mihai', 'in-progress'),
+    ],
+  },
+  {
+    id: 'SP-24',
+    name: 'Sprint 24',
+    wentWell: [
+      it('Swarming on the checkout bug cleared it in a single afternoon', 7),
+      it('Retro actions were actually reviewed at planning for once', 5),
+      it('Zero production incidents across the sprint', 3),
+    ],
+    wentWrong: [
+      it('CI pipeline flaky once more, this time on the integration suite', 6),
+      it('Estimation on the search rework was off by a factor of three', 5),
+      it('Design handoff landed on day 4 of a 10-day sprint', 4),
+    ],
+    actions: [
+      act('Fix the flaky CI integration suite properly — timebox one day', 'Dana', 'in-progress'),
+      act('Request design handoff assets one sprint ahead, as a planning gate', 'Ioana', 'open'),
+      act('Re-estimate anything above 8 points by splitting it first', 'Radu', 'open'),
+    ],
+  },
+  {
+    id: 'SP-25',
+    name: 'Sprint 25 (current)',
+    wentWell: [
+      it('The definition-of-done checklist caught two missing doc updates', 4),
+      it('Velocity held steady with two people on leave', 3),
+    ],
+    wentWrong: [
+      it('Staging data reset broke the QA accounts a second time', 6),
+      it('Code review queue sat at five open PRs for three days', 5),
+      it('Nobody owned the release checklist on the Thursday', 2),
+    ],
+    actions: [
+      act('Automate the staging QA accounts snapshot before every reset', 'Mihai', 'open'),
+      act('Cap the review queue at three open PRs before pulling new work', 'Carla', 'open'),
+    ],
+  },
+];
+
+const STATUS_TONE = { open: 'red', 'in-progress': 'amber', done: 'green' };
+const STATUS_NEXT = { open: 'in-progress', 'in-progress': 'done', done: 'open' };
+
+/* ---- recurrence matching: deliberately crude keyword overlap, no NLP ---- */
+
+const STOPWORDS = new Set(
+  ('the a an and or but for with that this these those from into them they it its of to in on at as we us our you your ' +
+   'is are was were be been being do does did done have has had will would should could can may might not no so if then ' +
+   'than there here when what which who how any all more most some such only own same too very just now also up out off ' +
+   'over under again once each other new one two three next last').split(' ')
+);
+const KEYWORDS = (text) =>
+  Array.from(new Set(
+    String(text).toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)
+      .filter((w) => w.length >= 2 && !STOPWORDS.has(w))
+  ));
+
+/** Two action items count as "the same issue" when they share >= 2 keywords. */
+const overlap = (a, b) => a.filter((w) => b.includes(w));
+const SIMILARITY_MIN = 2;
+
+/**
+ * Greedy clustering of every action item across every sprint. A cluster is
+ * flagged when it spans 2 or more distinct sprints — that is the real signal.
+ */
+function recurrenceClusters(sprints) {
+  const items = [];
+  sprints.forEach((sp) => sp.actions.forEach((a) => items.push({ ...a, sprintId: sp.id, sprintName: sp.name, kw: KEYWORDS(a.text) })));
+
+  const clusters = [];
+  items.forEach((item) => {
+    let best = null;
+    let bestShared = [];
+    clusters.forEach((c) => {
+      c.members.forEach((m) => {
+        const shared = overlap(item.kw, m.kw);
+        if (shared.length >= SIMILARITY_MIN && shared.length > bestShared.length) {
+          best = c;
+          bestShared = shared;
+        }
+      });
+    });
+    if (best) {
+      best.members.push(item);
+      best.shared = overlap(best.shared, item.kw).length ? overlap(best.shared, item.kw) : bestShared;
+    } else {
+      clusters.push({ id: uid('c'), members: [item], shared: item.kw });
+    }
+  });
+
+  return clusters
+    .map((c) => ({
+      ...c,
+      sprintIds: Array.from(new Set(c.members.map((m) => m.sprintId))),
+    }))
+    .filter((c) => c.sprintIds.length >= 2)
+    .sort((a, b) => b.sprintIds.length - a.sprintIds.length || b.members.length - a.members.length);
+}
+
+function RetroColumn({ title, tone, items, onAdd, onVote, onText, onRemove, extra, hint }) {
+  const [draft, setDraft] = useState('');
+  const head = {
+    green: 'border-emerald-200 bg-emerald-50 text-emerald-800',
+    red: 'border-red-200 bg-red-50 text-red-800',
+    teal: 'border-teal-200 bg-teal-50 text-teal-800',
+  }[tone];
+
+  return (
+    <div className="flex min-w-0 flex-col rounded-lg border border-slate-200 bg-white shadow-sm">
+      <header className={'flex items-center justify-between rounded-t-lg border-b px-3 py-2 ' + head}>
+        <h3 className="text-[13px] font-semibold uppercase tracking-wide">{title}</h3>
+        <span className="num text-[11px] font-semibold opacity-70">{items.length}</span>
+      </header>
+
+      <ul className="flex-1 divide-y divide-slate-100">
+        {items.length === 0 && <Empty>Nothing captured yet.</Empty>}
+        {items.map((item) => (
+          <li key={item.id} className="group px-3 py-2">
+            <div className="flex items-start gap-2">
+              <button
+                onClick={() => onVote(item.id, 1)}
+                title="Upvote"
+                className="mt-0.5 flex shrink-0 flex-col items-center rounded border border-slate-200 px-1.5 py-0.5 text-[10px] leading-none text-slate-500 hover:border-teal-400 hover:text-teal-700"
+              >
+                <span>&#9650;</span>
+                <span className="num mt-0.5 text-[12px] font-semibold text-slate-700">{item.votes}</span>
+              </button>
+              <div className="min-w-0 flex-1 text-[13px] leading-snug text-slate-700">
+                <Editable value={item.text} onChange={(v) => onText(item.id, v)} multiline placeholder="Describe it" />
+                {extra && extra(item)}
+              </div>
+              <span className="opacity-0 transition group-hover:opacity-100">
+                <XBtn onClick={() => onRemove(item.id)} />
+              </span>
+            </div>
+          </li>
+        ))}
+      </ul>
+
+      <div className="no-print flex items-center gap-2 border-t border-slate-100 bg-slate-50 px-3 py-2">
+        <input
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter' && draft.trim()) { onAdd(draft.trim()); setDraft(''); } }}
+          placeholder={hint}
+          className={inputCls + ' flex-1'}
+        />
+        <button
+          className={btnCls}
+          onClick={() => { if (draft.trim()) { onAdd(draft.trim()); setDraft(''); } }}
+        >
+          Add
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function RetrospectiveTab({ sprints, setSprints }) {
+  const [activeId, setActiveId] = useState(sprints[sprints.length - 1].id);
+  const [showRecurrence, setShowRecurrence] = useState(true);
+  const sprint = sprints.find((s) => s.id === activeId) || sprints[0];
+
+  const patch = (fn) => setSprints((all) => all.map((s) => (s.id === sprint.id ? fn(s) : s)));
+  const editList = (key, fn) => patch((s) => ({ ...s, [key]: fn(s[key]) }));
+
+  const addSprint = () => {
+    const n = sprints.length + 22;
+    const s = { id: uid('SP'), name: 'Sprint ' + n, wentWell: [], wentWrong: [], actions: [] };
+    setSprints((all) => [...all, s]);
+    setActiveId(s.id);
+  };
+
+  const convert = (wrongItem) => {
+    patch((s) => ({
+      ...s,
+      actions: [...s.actions, { id: uid('a'), text: wrongItem.text, owner: '', status: 'open', votes: wrongItem.votes, fromWrongId: wrongItem.id }],
+    }));
+  };
+
+  const clusters = useMemo(() => recurrenceClusters(sprints), [sprints]);
+  const openRepeats = clusters.filter((c) => c.members.some((m) => m.status !== 'done')).length;
+  const allActions = sprints.flatMap((s) => s.actions);
+  const doneRate = allActions.length ? Math.round((allActions.filter((a) => a.status === 'done').length / allActions.length) * 100) : 0;
+
+  return (
+    <div className="space-y-5">
+      <PageHead
+        title="Retrospective"
+        lead="One board per sprint, with votes to surface what the team actually cares about. Action items are converted straight out of the went-wrong column so they keep their context — and the recurrence view checks whether you are solving them or just rewriting them."
+        right={
+          <>
+            <select value={activeId} onChange={(e) => setActiveId(e.target.value)} className={inputCls}>
+              {sprints.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+            <button className={btnCls} onClick={addSprint}>+ Sprint</button>
+          </>
+        }
+      />
+
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <StatCard label="Sprints on record" value={sprints.length} />
+        <StatCard label="Action items" value={allActions.length} sub={doneRate + '% marked done'} />
+        <StatCard label="Repeat themes" value={clusters.length} sub="seen in 2+ sprints" tone={clusters.length ? 'amber' : 'slate'} />
+        <StatCard label="Still unresolved" value={openRepeats} sub="repeat themes with an open action" tone={openRepeats ? 'red' : 'green'} />
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <RetroColumn
+          title="Went well"
+          tone="green"
+          hint="What should we keep doing?"
+          items={sprint.wentWell}
+          onAdd={(text) => editList('wentWell', (l) => [...l, it(text, 0)])}
+          onVote={(id, d) => editList('wentWell', (l) => upd(l, id, (x) => ({ votes: Math.max(0, x.votes + d) })))}
+          onText={(id, v) => editList('wentWell', (l) => upd(l, id, { text: v }))}
+          onRemove={(id) => editList('wentWell', (l) => rm(l, id))}
+        />
+
+        <RetroColumn
+          title="Went wrong"
+          tone="red"
+          hint="What got in the way?"
+          items={sprint.wentWrong}
+          onAdd={(text) => editList('wentWrong', (l) => [...l, it(text, 0)])}
+          onVote={(id, d) => editList('wentWrong', (l) => upd(l, id, (x) => ({ votes: Math.max(0, x.votes + d) })))}
+          onText={(id, v) => editList('wentWrong', (l) => upd(l, id, { text: v }))}
+          onRemove={(id) => editList('wentWrong', (l) => rm(l, id))}
+          extra={(item) => {
+            const converted = sprint.actions.some((a) => a.fromWrongId === item.id);
+            return (
+              <div className="mt-1.5">
+                {converted ? (
+                  <Chip tone="teal">&#10003; converted to an action</Chip>
+                ) : (
+                  <button className={btnCls + ' text-[11px]'} onClick={() => convert(item)}>
+                    Convert to action item &rarr;
+                  </button>
+                )}
+              </div>
+            );
+          }}
+        />
+
+        <RetroColumn
+          title="Action items"
+          tone="teal"
+          hint="What will we change, and who owns it?"
+          items={sprint.actions}
+          onAdd={(text) => editList('actions', (l) => [...l, act(text, '', 'open')])}
+          onVote={(id, d) => editList('actions', (l) => upd(l, id, (x) => ({ votes: Math.max(0, x.votes + d) })))}
+          onText={(id, v) => editList('actions', (l) => upd(l, id, { text: v }))}
+          onRemove={(id) => editList('actions', (l) => rm(l, id))}
+          extra={(item) => (
+            <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px]">
+              <span className="text-slate-400">Owner</span>
+              <span className="min-w-[70px] font-medium text-slate-700">
+                <Editable value={item.owner} onChange={(v) => editList('actions', (l) => upd(l, item.id, { owner: v }))} placeholder="unassigned" className="px-1" />
+              </span>
+              <Chip
+                tone={STATUS_TONE[item.status]}
+                title="Click to cycle status"
+                onClick={() => editList('actions', (l) => upd(l, item.id, (x) => ({ status: STATUS_NEXT[x.status] })))}
+              >
+                {item.status}
+              </Chip>
+            </div>
+          )}
+        />
+      </div>
+
+      <Card
+        title="Recurrence view — issues that keep coming back"
+        right={<button className={btnCls} onClick={() => setShowRecurrence((v) => !v)}>{showRecurrence ? 'Hide' : 'Show'}</button>}
+      >
+        {showRecurrence && (
+          <div className="divide-y divide-slate-100">
+            <p className="px-3 py-2 text-[12px] leading-relaxed text-slate-500">
+              Action items across every stored sprint are grouped by shared keywords. A group is flagged when the same
+              theme shows up in two or more sprints — a repeat action is usually a signal the underlying cause was
+              never addressed, only re-described.
+            </p>
+
+            {clusters.length === 0 && <Empty>No theme has repeated across sprints yet.</Empty>}
+
+            {clusters.map((c) => {
+              const unresolved = c.members.some((m) => m.status !== 'done');
+              return (
+                <div key={c.id} className="px-3 py-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Chip tone={unresolved ? 'red' : 'green'}>
+                      {c.sprintIds.length}&#215; across sprints
+                    </Chip>
+                    {unresolved
+                      ? <Chip tone="amber">still open somewhere</Chip>
+                      : <Chip tone="green">closed everywhere</Chip>}
+                    <span className="text-[11px] text-slate-400">
+                      matched on: {c.shared.slice(0, 5).map((w) => '"' + w + '"').join(', ')}
+                    </span>
+                  </div>
+                  <ul className="mt-2 space-y-1.5">
+                    {c.members.map((m) => (
+                      <li key={m.id} className="flex flex-wrap items-baseline gap-2 text-[13px] text-slate-700">
+                        <span className="w-[110px] shrink-0 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                          {m.sprintName}
+                        </span>
+                        <span className="min-w-0 flex-1">{m.text}</span>
+                        <span className="text-[11px] text-slate-400">{m.owner || 'unassigned'}</span>
+                        <Chip tone={STATUS_TONE[m.status]}>{m.status}</Chip>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Card>
+
+      <FootNote>
+        recurrence is a plain keyword-overlap match, not language understanding. Two action items are grouped when they
+        share at least {SIMILARITY_MIN} significant words after stop-words are stripped, so re-wordings of the same
+        problem usually group and unrelated items occasionally will too. Treat a flagged group as a prompt to look, not
+        as a verdict. Votes are anonymous counters — nothing records who cast them.
+      </FootNote>
+    </div>
+  );
+}
+
+/* ==========================================================================
+   TAB 2 — DEFINITION OF DONE
+   Configurable criteria list, a per-story checklist, and the one number that
+   matters: how many stories actually closed at full compliance.
+   ========================================================================== */
+
+const SEED_DOD_CRITERIA = [
+  { id: 'c-tests', label: 'Tests passed' },
+  { id: 'c-docs', label: 'Docs updated' },
+  { id: 'c-review', label: 'Code reviewed' },
+  { id: 'c-po', label: 'PO reviewed' },
+];
+
+/** checks is keyed by criterion id; a missing key reads as unchecked. */
+const dodStory = (id, title, status, checks) => ({ id, title, status, checks });
+
+const SEED_DOD_STORIES = [
+  dodStory('S-201', 'Checkout: apply promo code at the payment step', 'Done', { 'c-tests': true, 'c-docs': true, 'c-review': true, 'c-po': true }),
+  dodStory('S-202', 'Export order history to CSV', 'Done', { 'c-tests': true, 'c-docs': false, 'c-review': true, 'c-po': true }),
+  dodStory('S-203', 'Password reset email throttling', 'Done', { 'c-tests': true, 'c-docs': true, 'c-review': true, 'c-po': true }),
+  dodStory('S-204', 'Search: fuzzy match on product names', 'Done', { 'c-tests': true, 'c-docs': true, 'c-review': true, 'c-po': false }),
+  dodStory('S-205', 'Migrate the session store to Redis', 'Done', { 'c-tests': true, 'c-docs': false, 'c-review': true, 'c-po': false }),
+  dodStory('S-206', 'Accessibility pass on the main navigation', 'Done', { 'c-tests': true, 'c-docs': true, 'c-review': true, 'c-po': true }),
+  dodStory('S-207', 'Invoice PDF layout for EU VAT', 'Done', { 'c-tests': false, 'c-docs': true, 'c-review': true, 'c-po': true }),
+  dodStory('S-208', 'Rate-limit the public API', 'Done', { 'c-tests': true, 'c-docs': true, 'c-review': true, 'c-po': true }),
+  dodStory('S-209', 'Dark mode for the settings screen', 'In progress', { 'c-tests': false, 'c-docs': false, 'c-review': true, 'c-po': false }),
+  dodStory('S-210', 'Bulk refund tooling for support agents', 'In progress', { 'c-tests': false, 'c-docs': false, 'c-review': false, 'c-po': false }),
+];
+
+const DOD_STATUSES = ['To do', 'In progress', 'Done'];
+
+function DefinitionOfDoneTab({ criteria, setCriteria, stories, setStories }) {
+  const [newCriterion, setNewCriterion] = useState('');
+  const [newStory, setNewStory] = useState('');
+
+  const addCriterion = () => {
+    const label = newCriterion.trim();
+    if (!label) return;
+    setCriteria((c) => [...c, { id: uid('c'), label }]);
+    setNewCriterion('');
+  };
+
+  const removeCriterion = (id) => {
+    setCriteria((c) => rm(c, id));
+    setStories((ss) => ss.map((s) => {
+      const checks = { ...s.checks };
+      delete checks[id];
+      return { ...s, checks };
+    }));
+  };
+
+  const addStory = () => {
+    const title = newStory.trim();
+    if (!title) return;
+    const nums = stories.map((s) => Number(String(s.id).replace(/\D/g, '')) || 0);
+    const next = 'S-' + (Math.max(200, ...nums) + 1);
+    setStories((ss) => [...ss, dodStory(next, title, 'To do', {})]);
+    setNewStory('');
+  };
+
+  const toggle = (storyId, critId) =>
+    setStories((ss) => upd(ss, storyId, (s) => ({ checks: { ...s.checks, [critId]: !s.checks[critId] } })));
+
+  const metCount = (s) => criteria.filter((c) => s.checks[c.id]).length;
+
+  const done = stories.filter((s) => s.status === 'Done');
+  const full = done.filter((s) => criteria.length > 0 && metCount(s) === criteria.length);
+  const partial = done.filter((s) => !(criteria.length > 0 && metCount(s) === criteria.length));
+  const fullPct = done.length ? Math.round((full.length / done.length) * 100) : 0;
+  const partialPct = done.length ? 100 - fullPct : 0;
+
+  /** Which criterion gets skipped most often on stories already called Done. */
+  const skipRanking = criteria
+    .map((c) => ({ ...c, skipped: done.filter((s) => !s.checks[c.id]).length }))
+    .sort((a, b) => b.skipped - a.skipped);
+  const worst = skipRanking[0];
+
+  return (
+    <div className="space-y-5">
+      <PageHead
+        title="Definition of Done"
+        lead="The DoD is only worth having if closing a story without it is visible. Configure the criteria, tick them per story, and watch the compliance split — the gap between stories marked Done and stories actually done."
+      />
+
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <StatCard label="Stories marked Done" value={done.length} sub={'of ' + stories.length + ' tracked'} />
+        <StatCard label="Full DoD compliance" value={fullPct + '%'} sub={full.length + ' of ' + done.length + ' closed clean'} tone={fullPct >= 80 ? 'green' : fullPct >= 50 ? 'amber' : 'red'} />
+        <StatCard label="Closed with a gap" value={partialPct + '%'} sub={partial.length + ' skipped at least one criterion'} tone={partialPct > 0 ? 'amber' : 'green'} />
+        <StatCard label="Most-skipped criterion" value={worst && worst.skipped ? worst.skipped : 0} sub={worst && worst.skipped ? worst.label : 'nothing skipped'} tone={worst && worst.skipped ? 'red' : 'green'} />
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,270px)_minmax(0,1fr)]">
+        <Card title="DoD criteria">
+          <ul className="divide-y divide-slate-100">
+            {criteria.length === 0 && <Empty>No criteria — every story counts as compliant.</Empty>}
+            {criteria.map((c) => {
+              const skipped = done.filter((s) => !s.checks[c.id]).length;
+              return (
+                <li key={c.id} className="group flex items-center gap-2 px-3 py-2">
+                  <span className="min-w-0 flex-1 text-[13px] text-slate-700">
+                    <Editable value={c.label} onChange={(v) => setCriteria((all) => upd(all, c.id, { label: v }))} className="px-1" />
+                  </span>
+                  <Chip tone={skipped === 0 ? 'green' : skipped > done.length / 3 ? 'red' : 'amber'} title="Done stories that skipped this">
+                    {skipped} skipped
+                  </Chip>
+                  <span className="opacity-0 transition group-hover:opacity-100">
+                    <XBtn onClick={() => removeCriterion(c.id)} title="Remove criterion from every story" />
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+          <div className="no-print flex items-center gap-2 border-t border-slate-100 bg-slate-50 px-3 py-2">
+            <input
+              value={newCriterion}
+              onChange={(e) => setNewCriterion(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && addCriterion()}
+              placeholder="e.g. Deployed to staging"
+              className={inputCls + ' flex-1'}
+            />
+            <button className={btnCls} onClick={addCriterion}>Add</button>
+          </div>
+
+          <div className="border-t border-slate-100 px-3 py-3">
+            <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Compliance split</div>
+            <div className="mt-2 flex h-3 overflow-hidden rounded-full bg-slate-100">
+              <div className="bg-emerald-500" style={{ width: fullPct + '%' }} title={'Full compliance: ' + fullPct + '%'} />
+              <div className="bg-amber-400" style={{ width: partialPct + '%' }} title={'At least one skipped: ' + partialPct + '%'} />
+            </div>
+            <div className="mt-2 flex justify-between text-[11px] text-slate-500">
+              <span><span className="num font-semibold text-emerald-700">{fullPct}%</span> clean</span>
+              <span><span className="num font-semibold text-amber-700">{partialPct}%</span> with a gap</span>
+            </div>
+          </div>
+        </Card>
+
+        <Card
+          title="Per-story checklist"
+          right={<span className="text-[11px] text-slate-400">Double-click a title to edit &middot; click a status to cycle</span>}
+        >
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[700px] text-[13px]">
+              <thead>
+                <tr className="border-b border-slate-100 text-[11px] uppercase tracking-wide text-slate-400">
+                  <th className="px-3 py-2 text-left font-semibold min-w-[240px]">Story</th>
+                  {criteria.map((c) => (
+                    <th key={c.id} className="px-2 py-2 text-center font-semibold" title={c.label}>
+                      <span className="block max-w-[92px] truncate">{c.label}</span>
+                    </th>
+                  ))}
+                  <th className="px-3 py-2 text-right font-semibold">Status</th>
+                  <th className="w-8" />
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {stories.length === 0 && (
+                  <tr><td colSpan={criteria.length + 3}><Empty>No stories yet.</Empty></td></tr>
+                )}
+                {stories.map((s) => {
+                  const met = metCount(s);
+                  const clean = criteria.length > 0 && met === criteria.length;
+                  const flagged = s.status === 'Done' && !clean;
+                  return (
+                    <tr key={s.id} className={'group ' + (flagged ? 'bg-amber-50/50' : 'hover:bg-slate-50')}>
+                      <td className="px-3 py-2">
+                        <div className="flex items-baseline gap-2">
+                          <span className="num shrink-0 text-[11px] font-semibold text-slate-400">{s.id}</span>
+                          <span className="min-w-0 text-slate-700">
+                            <Editable value={s.title} onChange={(v) => setStories((all) => upd(all, s.id, { title: v }))} className="px-1" />
+                          </span>
+                        </div>
+                        {flagged && (
+                          <div className="mt-1 text-[11px] text-amber-700">
+                            closed with {criteria.length - met} criterion{criteria.length - met === 1 ? '' : 's'} skipped
+                          </div>
+                        )}
+                      </td>
+                      {criteria.map((c) => (
+                        <td key={c.id} className="px-2 py-2 text-center">
+                          <input
+                            type="checkbox"
+                            checked={!!s.checks[c.id]}
+                            onChange={() => toggle(s.id, c.id)}
+                            className="h-4 w-4 cursor-pointer accent-teal-600"
+                          />
+                        </td>
+                      ))}
+                      <td className="px-3 py-2 text-right">
+                        <Chip
+                          tone={s.status === 'Done' ? (clean ? 'green' : 'amber') : s.status === 'In progress' ? 'teal' : 'slate'}
+                          title="Click to cycle status"
+                          onClick={() => setStories((all) => upd(all, s.id, (x) => ({ status: DOD_STATUSES[(DOD_STATUSES.indexOf(x.status) + 1) % DOD_STATUSES.length] })))}
+                        >
+                          {s.status} &middot; <span className="num">{met}/{criteria.length}</span>
+                        </Chip>
+                      </td>
+                      <td className="pr-2 text-right">
+                        <span className="opacity-0 transition group-hover:opacity-100">
+                          <XBtn onClick={() => setStories((all) => rm(all, s.id))} />
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div className="no-print flex items-center gap-2 border-t border-slate-100 bg-slate-50 px-3 py-2">
+            <input
+              value={newStory}
+              onChange={(e) => setNewStory(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && addStory()}
+              placeholder="New story title"
+              className={inputCls + ' flex-1'}
+            />
+            <button className={btnCls} onClick={addStory}>+ Story</button>
+          </div>
+        </Card>
+      </div>
+
+      <FootNote>
+        the compliance percentages count only stories whose status is <strong>Done</strong> — anything still to do or in
+        progress is excluded, since an unfinished checklist there is expected rather than a breach. Removing a criterion
+        drops it from every story's checklist and recomputes the split immediately, so historical compliance is measured
+        against the criteria list as it stands right now, not as it stood when the story closed.
+      </FootNote>
+    </div>
+  );
+}
+
+/* ==========================================================================
+   TAB 3 — ESTIMATION ACCURACY
+   Points as estimated against cycle time as measured, so the team can see
+   where the estimate and the reality stopped agreeing.
+   ========================================================================== */
+
+const SEED_EST_SPRINTS = [
+  { id: 'ES-20', name: 'Sprint 20' },
+  { id: 'ES-21', name: 'Sprint 21' },
+  { id: 'ES-22', name: 'Sprint 22' },
+  { id: 'ES-23', name: 'Sprint 23' },
+  { id: 'ES-24', name: 'Sprint 24' },
+  { id: 'ES-25', name: 'Sprint 25' },
+];
+
+const est = (id, title, sprintId, points, startAgo, endAgo) => ({
+  id, title, sprintId, points, start: agoWeekday(startAgo), end: agoWeekday(endAgo),
+});
+
+const SEED_EST_STORIES = [
+  est('S-301', 'Add SSO login via Azure AD', 'ES-20', 8, 74, 66),
+  est('S-302', 'Fix currency rounding on invoices', 'ES-20', 2, 73, 71),
+  est('S-303', 'Product image lazy loading', 'ES-20', 3, 70, 67),
+
+  est('S-304', 'Order history pagination', 'ES-21', 3, 60, 57),
+  est('S-305', 'Refactor the payment gateway adapter', 'ES-21', 13, 60, 51),
+  est('S-306', 'Email template localisation (RO / EN)', 'ES-21', 5, 58, 53),
+  est('S-307', 'Fix broken breadcrumb on category pages', 'ES-21', 1, 56, 56),
+
+  est('S-308', 'Customer address book CRUD', 'ES-22', 5, 46, 41),
+  est('S-309', 'Export order history to CSV', 'ES-22', 3, 45, 37),
+  est('S-310', 'Bulk product import validation', 'ES-22', 8, 45, 38),
+  est('S-311', 'Session timeout warning modal', 'ES-22', 2, 42, 41),
+
+  est('S-312', 'Password reset email throttling', 'ES-23', 2, 32, 31),
+  est('S-313', 'Search: fuzzy match on product names', 'ES-23', 8, 32, 24),
+  est('S-314', 'Wishlist sharing links', 'ES-23', 5, 30, 26),
+  est('S-315', 'Fix VAT calculation for EU B2B orders', 'ES-23', 3, 28, 26),
+
+  est('S-316', 'Migrate the session store to Redis', 'ES-24', 8, 18, 12),
+  est('S-317', 'Rate-limit the public API', 'ES-24', 5, 17, 14),
+  est('S-318', 'Accessibility pass on the main navigation', 'ES-24', 3, 17, 9),
+  est('S-319', 'Checkout: apply promo code at the payment step', 'ES-24', 5, 15, 10),
+
+  est('S-320', 'Invoice PDF layout for EU VAT', 'ES-25', 5, 9, 4),
+  est('S-321', 'Dark mode for the settings screen', 'ES-25', 3, 8, 5),
+  est('S-322', 'Support tooling: bulk refunds', 'ES-25', 8, 9, 2),
+];
+
+function ScatterChart({ rows, avgRatio, threshold }) {
+  const W = 760, H = 330;
+  const m = { l: 46, r: 18, t: 16, b: 40 };
+  const pw = W - m.l - m.r, ph = H - m.t - m.b;
+
+  const maxX = Math.max(14, ...rows.map((r) => r.points)) * 1.05;
+  const maxY = Math.max(4, ...rows.map((r) => r.days)) * 1.12;
+  const x = (v) => m.l + (v / maxX) * pw;
+  const y = (v) => m.t + ph - (v / maxY) * ph;
+  const yTicks = niceTicks(maxY, 5);
+
+  return (
+    <svg viewBox={'0 0 ' + W + ' ' + H} className="h-[330px] w-full" preserveAspectRatio="xMidYMid meet">
+      {yTicks.map((t) => (
+        <g key={t}>
+          <line x1={m.l} x2={W - m.r} y1={y(t)} y2={y(t)} stroke={GRID} strokeWidth="1" />
+          <text x={m.l - 8} y={y(t) + 4} textAnchor="end" fontSize="11" fill={TICK} className="num">{t}</text>
+        </g>
+      ))}
+
+      {FIB.map((p) => (
+        <text key={p} x={x(p)} y={H - 18} textAnchor="middle" fontSize="11" fill={TICK} className="num">{p}</text>
+      ))}
+
+      {/* what the average days-per-point ratio predicts */}
+      <line x1={x(0)} y1={y(0)} x2={x(maxX)} y2={y(avgRatio * maxX)} stroke="#0d9488" strokeWidth="2" strokeDasharray="6 5" />
+      <line x1={x(0)} y1={y(0)} x2={x(maxX)} y2={y(avgRatio * threshold * maxX)} stroke="#f59e0b" strokeWidth="1.5" strokeDasharray="3 4" />
+
+      {rows.map((r) => (
+        <circle
+          key={r.id}
+          cx={x(r.points)} cy={y(r.days)} r={r.flag ? 6 : 4.5}
+          fill={r.flag === 'over' ? '#dc2626' : r.flag === 'under' ? '#0891b2' : '#0d9488'}
+          fillOpacity={r.flag ? 0.95 : 0.65}
+          stroke="#fff" strokeWidth="1.5"
+        >
+          <title>{r.id + ' — ' + r.title + '\n' + r.points + ' pts, ' + r.days + ' working days (' + round2(r.ratio) + ' d/pt)'}</title>
+        </circle>
+      ))}
+
+      <line x1={m.l} x2={m.l} y1={m.t} y2={m.t + ph} stroke={AXIS} />
+      <line x1={m.l} x2={W - m.r} y1={m.t + ph} y2={m.t + ph} stroke={AXIS} />
+      <text x={m.l + pw / 2} y={H - 3} textAnchor="middle" fontSize="11" fill={TICK}>estimated points</text>
+      <text x={12} y={m.t + ph / 2} textAnchor="middle" fontSize="11" fill={TICK} transform={'rotate(-90 12 ' + (m.t + ph / 2) + ')'}>
+        actual cycle time (working days)
+      </text>
+    </svg>
+  );
+}
+
+function VelocityChart({ points }) {
+  const W = 760, H = 250;
+  const m = { l: 46, r: 18, t: 16, b: 40 };
+  const pw = W - m.l - m.r, ph = H - m.t - m.b;
+  const maxY = Math.max(5, ...points.map((p) => p.value)) * 1.18;
+  const yTicks = niceTicks(maxY, 4);
+  const step = points.length > 1 ? pw / (points.length - 1) : 0;
+  const x = (i) => (points.length === 1 ? m.l + pw / 2 : m.l + i * step);
+  const y = (v) => m.t + ph - (v / maxY) * ph;
+  const barW = Math.min(46, (pw / Math.max(points.length, 1)) * 0.5);
+  const mean = avg(points.map((p) => p.value));
+
+  return (
+    <svg viewBox={'0 0 ' + W + ' ' + H} className="h-[250px] w-full" preserveAspectRatio="xMidYMid meet">
+      {yTicks.map((t) => (
+        <g key={t}>
+          <line x1={m.l} x2={W - m.r} y1={y(t)} y2={y(t)} stroke={GRID} strokeWidth="1" />
+          <text x={m.l - 8} y={y(t) + 4} textAnchor="end" fontSize="11" fill={TICK} className="num">{t}</text>
+        </g>
+      ))}
+
+      {points.map((p, i) => (
+        <rect key={p.label} x={x(i) - barW / 2} y={y(p.value)} width={barW} height={Math.max(0, m.t + ph - y(p.value))} rx="3" fill="#99f6e4">
+          <title>{p.label + ': ' + p.value + ' pts'}</title>
+        </rect>
+      ))}
+
+      <line x1={m.l} x2={W - m.r} y1={y(mean)} y2={y(mean)} stroke="#94a3b8" strokeWidth="1.5" strokeDasharray="5 4" />
+      <text x={W - m.r} y={y(mean) - 6} textAnchor="end" fontSize="10" fill="#94a3b8">
+        mean {round1(mean)}
+      </text>
+
+      <polyline
+        points={points.map((p, i) => x(i) + ',' + y(p.value)).join(' ')}
+        fill="none" stroke="#0d9488" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"
+      />
+      {points.map((p, i) => (
+        <g key={p.label}>
+          <circle cx={x(i)} cy={y(p.value)} r="4" fill="#0d9488" stroke="#fff" strokeWidth="1.5" />
+          <text x={x(i)} y={y(p.value) - 10} textAnchor="middle" fontSize="11" fill="#0f766e" fontWeight="700" className="num">{p.value}</text>
+          <text x={x(i)} y={H - 16} textAnchor="middle" fontSize="11" fill={TICK}>{p.label}</text>
+        </g>
+      ))}
+
+      <line x1={m.l} x2={m.l} y1={m.t} y2={m.t + ph} stroke={AXIS} />
+      <line x1={m.l} x2={W - m.r} y1={m.t + ph} y2={m.t + ph} stroke={AXIS} />
+    </svg>
+  );
+}
+
+function EstimationAccuracyTab({ sprints, setSprints, stories, setStories }) {
+  const [threshold, setThreshold] = useState(2);
+  const [draft, setDraft] = useState({ title: '', sprintId: sprints[sprints.length - 1].id, points: 3, start: ago(5), end: TODAY_ISO });
+
+  const measured = useMemo(
+    () => stories.map((s) => {
+      const days = workingDays(s.start, s.end);
+      return { ...s, days, ratio: s.points > 0 ? days / s.points : 0 };
+    }),
+    [stories]
+  );
+
+  const totalDays = sum(measured.map((r) => r.days));
+  const totalPoints = sum(measured.map((r) => r.points));
+  const avgRatio = totalPoints > 0 ? totalDays / totalPoints : 0;
+
+  const rows = measured.map((r) => ({
+    ...r,
+    flag: avgRatio > 0 && r.ratio > avgRatio * threshold ? 'over'
+        : avgRatio > 0 && r.ratio < avgRatio / threshold ? 'under'
+        : null,
+  }));
+  const flagged = rows.filter((r) => r.flag);
+
+  const velocity = sprints.map((sp) => ({
+    label: sp.name.replace('Sprint ', 'S'),
+    value: sum(measured.filter((r) => r.sprintId === sp.id).map((r) => r.points)),
+  }));
+  const lastTwo = velocity.slice(-2);
+  const trend = lastTwo.length === 2 ? lastTwo[1].value - lastTwo[0].value : 0;
+
+  const addStory = () => {
+    if (!draft.title.trim()) return;
+    const nums = stories.map((s) => Number(String(s.id).replace(/\D/g, '')) || 0);
+    setStories((ss) => [...ss, { ...draft, title: draft.title.trim(), id: 'S-' + (Math.max(300, ...nums) + 1) }]);
+    setDraft((d) => ({ ...d, title: '' }));
+  };
+
+  const addSprint = () => {
+    const n = 20 + sprints.length;
+    setSprints((all) => [...all, { id: uid('ES'), name: 'Sprint ' + n }]);
+  };
+
+  return (
+    <div className="space-y-5">
+      <PageHead
+        title="Estimation Accuracy"
+        lead="Estimated points against measured cycle time, story by story. The point of the scatter is not to grade the estimates but to find the stories that behaved nothing like their size — those are where the hidden work lives."
+        right={
+          <label className="flex items-center gap-2 text-[12px] text-slate-500">
+            Outlier threshold
+            <NumField value={threshold} step={0.25} min={1.25} width="w-20" onChange={(v) => setThreshold(clamp(v, 1.25, 6))} suffix="&#215; mean" />
+          </label>
+        }
+      />
+
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <StatCard label="Stories measured" value={rows.length} sub={totalPoints + ' points, ' + totalDays + ' working days'} />
+        <StatCard label="Mean days per point" value={round2(avgRatio)} sub="the ratio every flag is judged against" tone="teal" />
+        <StatCard label="Outliers flagged" value={flagged.length} sub={'beyond ' + threshold + '× or under 1/' + threshold + '× the mean'} tone={flagged.length ? 'amber' : 'green'} />
+        <StatCard
+          label="Velocity, last sprint"
+          value={velocity.length ? velocity[velocity.length - 1].value : 0}
+          sub={trend === 0 ? 'flat on the sprint before' : (trend > 0 ? '▲ +' : '▼ ') + trend + ' pts on the sprint before'}
+          tone={trend >= 0 ? 'green' : 'amber'}
+        />
+      </div>
+
+      <Card title="Estimated points vs. actual cycle time">
+        <Legend items={[
+          { color: '#0d9488', label: 'story (within range)' },
+          { color: '#dc2626', label: 'took far longer than its size' },
+          { color: '#0891b2', label: 'finished far faster than its size' },
+        ]} />
+        <ScatterChart rows={rows} avgRatio={avgRatio} threshold={threshold} />
+        <p className="px-3 pb-3 text-[11px] text-slate-400">
+          The teal dashed line is the team's mean days-per-point ratio; the amber line is the outlier threshold at{' '}
+          <span className="num">{threshold}&#215;</span> that ratio. Hover a dot for the story.
+        </p>
+      </Card>
+
+      <Card title="Velocity trend — completed points per sprint" right={<button className={btnCls} onClick={addSprint}>+ Sprint</button>}>
+        <VelocityChart points={velocity} />
+      </Card>
+
+      {flagged.length > 0 && (
+        <Card title={'Flagged stories (' + flagged.length + ')'}>
+          <ul className="divide-y divide-slate-100">
+            {flagged.sort((a, b) => b.ratio - a.ratio).map((r) => (
+              <li key={r.id} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-3 py-2 text-[13px]">
+                <span className="num shrink-0 text-[11px] font-semibold text-slate-400">{r.id}</span>
+                <span className="min-w-0 flex-1 text-slate-700">{r.title}</span>
+                <span className="num text-slate-500">{r.points} pts</span>
+                <span className="num text-slate-500">{r.days} d</span>
+                <Chip tone={r.flag === 'over' ? 'red' : 'teal'}>
+                  <span className="num">{round2(r.ratio)}</span> d/pt &middot; {round1(r.ratio / avgRatio)}&#215; mean
+                </Chip>
+                <span className="w-full text-[11px] text-slate-400 sm:w-auto">
+                  {r.flag === 'over'
+                    ? 'took much longer than the estimate implies — look for a hidden dependency, a wait state, or a story that should have been split'
+                    : 'closed far faster than the estimate implies — likely over-sized at refinement'}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
+
+      <Card title="Stories" right={<span className="text-[11px] text-slate-400">Double-click a title &middot; edit points and dates inline</span>}>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[760px] text-[13px]">
+            <thead>
+              <tr className="border-b border-slate-100 text-[11px] uppercase tracking-wide text-slate-400">
+                <th className="px-3 py-2 text-left font-semibold">Story</th>
+                <th className="px-2 py-2 text-left font-semibold">Sprint</th>
+                <th className="px-2 py-2 text-right font-semibold">Points</th>
+                <th className="px-2 py-2 text-left font-semibold">Started</th>
+                <th className="px-2 py-2 text-left font-semibold">Finished</th>
+                <th className="px-2 py-2 text-right font-semibold">Cycle</th>
+                <th className="px-2 py-2 text-right font-semibold">d / pt</th>
+                <th className="w-8" />
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {rows.map((r) => (
+                <tr key={r.id} className={'group ' + (r.flag === 'over' ? 'bg-red-50/40' : r.flag === 'under' ? 'bg-cyan-50/40' : 'hover:bg-slate-50')}>
+                  <td className="px-3 py-1.5">
+                    <div className="flex items-baseline gap-2">
+                      <span className="num shrink-0 text-[11px] font-semibold text-slate-400">{r.id}</span>
+                      <span className="min-w-0 text-slate-700">
+                        <Editable value={r.title} onChange={(v) => setStories((all) => upd(all, r.id, { title: v }))} className="px-1" />
+                      </span>
+                    </div>
+                  </td>
+                  <td className="px-2 py-1.5">
+                    <select
+                      value={r.sprintId}
+                      onChange={(e) => setStories((all) => upd(all, r.id, { sprintId: e.target.value }))}
+                      className={inputCls + ' py-0.5 text-[12px]'}
+                    >
+                      {sprints.map((sp) => <option key={sp.id} value={sp.id}>{sp.name}</option>)}
+                    </select>
+                  </td>
+                  <td className="px-2 py-1.5 text-right">
+                    <select
+                      value={r.points}
+                      onChange={(e) => setStories((all) => upd(all, r.id, { points: Number(e.target.value) }))}
+                      className={inputCls + ' num py-0.5 text-[12px]'}
+                    >
+                      {FIB.map((p) => <option key={p} value={p}>{p}</option>)}
+                    </select>
+                  </td>
+                  <td className="px-2 py-1.5">
+                    <input type="date" value={r.start} onChange={(e) => setStories((all) => upd(all, r.id, { start: e.target.value }))} className={inputCls + ' num py-0.5 text-[12px]'} />
+                  </td>
+                  <td className="px-2 py-1.5">
+                    <input type="date" value={r.end} onChange={(e) => setStories((all) => upd(all, r.id, { end: e.target.value }))} className={inputCls + ' num py-0.5 text-[12px]'} />
+                  </td>
+                  <td className="num px-2 py-1.5 text-right font-semibold text-slate-700">{r.days} d</td>
+                  <td className={'num px-2 py-1.5 text-right ' + (r.flag ? 'font-semibold text-red-700' : 'text-slate-500')}>{round2(r.ratio)}</td>
+                  <td className="pr-2 text-right">
+                    <span className="opacity-0 transition group-hover:opacity-100">
+                      <XBtn onClick={() => setStories((all) => rm(all, r.id))} />
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="no-print flex flex-wrap items-center gap-2 border-t border-slate-100 bg-slate-50 px-3 py-2">
+          <input
+            value={draft.title}
+            onChange={(e) => setDraft({ ...draft, title: e.target.value })}
+            onKeyDown={(e) => e.key === 'Enter' && addStory()}
+            placeholder="New story title"
+            className={inputCls + ' min-w-[200px] flex-1'}
+          />
+          <select value={draft.sprintId} onChange={(e) => setDraft({ ...draft, sprintId: e.target.value })} className={inputCls}>
+            {sprints.map((sp) => <option key={sp.id} value={sp.id}>{sp.name}</option>)}
+          </select>
+          <select value={draft.points} onChange={(e) => setDraft({ ...draft, points: Number(e.target.value) })} className={inputCls + ' num'}>
+            {FIB.map((p) => <option key={p} value={p}>{p} pts</option>)}
+          </select>
+          <input type="date" value={draft.start} onChange={(e) => setDraft({ ...draft, start: e.target.value })} className={inputCls + ' num'} />
+          <input type="date" value={draft.end} onChange={(e) => setDraft({ ...draft, end: e.target.value })} className={inputCls + ' num'} />
+          <button className={btnPrimary} onClick={addStory}>+ Story</button>
+        </div>
+      </Card>
+
+      <FootNote>
+        cycle time counts business days from the start date to the finish date with both ends included and Saturdays and
+        Sundays skipped — a story that started Monday and closed Wednesday reads as 3 days, and public holidays are not
+        modelled. The outlier flag is a flat threshold against the team's own mean days-per-point ratio, recomputed from
+        whatever stories are in the table, so adding or removing stories moves the line for everyone.
+      </FootNote>
+    </div>
+  );
+}
+
+/* ==========================================================================
+   TAB 4 — HYBRID EVM
+   Earned value bolted onto a Scrum cadence. Every figure here is typed in by
+   hand — nothing is derived from story points.
+   ========================================================================== */
+
+const SEED_EVM = [
+  { id: 'EV-20', name: 'Sprint 20', pv: 32000, ev: 30500, ac: 33800 },
+  { id: 'EV-21', name: 'Sprint 21', pv: 34000, ev: 35200, ac: 34100 },
+  { id: 'EV-22', name: 'Sprint 22', pv: 34000, ev: 29800, ac: 36500 },
+  { id: 'EV-23', name: 'Sprint 23', pv: 33000, ev: 32100, ac: 33400 },
+  { id: 'EV-24', name: 'Sprint 24', pv: 35000, ev: 36400, ac: 34200 },
+  { id: 'EV-25', name: 'Sprint 25', pv: 35000, ev: 31500, ac: 35900 },
+];
+
+const indexTone = (v) => (!isFinite(v) || v <= 0 ? 'slate' : v < 0.9 ? 'red' : v <= 1.0 ? 'amber' : 'green');
+const INDEX_COLOR = { red: '#dc2626', amber: '#f59e0b', green: '#059669', slate: '#94a3b8' };
+
+const money = (n) => n.toLocaleString('en-US', { maximumFractionDigits: 0 });
+
+function EvmLineChart({ rows }) {
+  const W = 780, H = 300;
+  const m = { l: 62, r: 18, t: 18, b: 40 };
+  const pw = W - m.l - m.r, ph = H - m.t - m.b;
+  const maxY = Math.max(1, ...rows.flatMap((r) => [r.pv, r.ev, r.ac])) * 1.12;
+  const yTicks = niceTicks(maxY, 5);
+  const step = rows.length > 1 ? pw / (rows.length - 1) : 0;
+  const x = (i) => (rows.length === 1 ? m.l + pw / 2 : m.l + i * step);
+  const y = (v) => m.t + ph - (v / maxY) * ph;
+
+  const series = [
+    { key: 'pv', label: 'Planned value (PV)', color: '#94a3b8', dash: '6 5' },
+    { key: 'ev', label: 'Earned value (EV)', color: '#0d9488', dash: null },
+    { key: 'ac', label: 'Actual cost (AC)', color: '#f59e0b', dash: null },
+  ];
+
+  return (
+    <svg viewBox={'0 0 ' + W + ' ' + H} className="h-[300px] w-full" preserveAspectRatio="xMidYMid meet">
+      {yTicks.map((t) => (
+        <g key={t}>
+          <line x1={m.l} x2={W - m.r} y1={y(t)} y2={y(t)} stroke={GRID} strokeWidth="1" />
+          <text x={m.l - 8} y={y(t) + 4} textAnchor="end" fontSize="11" fill={TICK} className="num">{money(t)}</text>
+        </g>
+      ))}
+
+      {series.map((s) => (
+        <g key={s.key}>
+          <polyline
+            points={rows.map((r, i) => x(i) + ',' + y(r[s.key])).join(' ')}
+            fill="none" stroke={s.color} strokeWidth={s.key === 'pv' ? 2 : 2.5}
+            strokeDasharray={s.dash || undefined} strokeLinejoin="round" strokeLinecap="round"
+          />
+          {rows.map((r, i) => (
+            <circle key={r.id} cx={x(i)} cy={y(r[s.key])} r="3.6" fill={s.color} stroke="#fff" strokeWidth="1.5">
+              <title>{r.name + ' — ' + s.label + ': ' + money(r[s.key])}</title>
+            </circle>
+          ))}
+        </g>
+      ))}
+
+      {rows.map((r, i) => (
+        <text key={r.id} x={x(i)} y={H - 16} textAnchor="middle" fontSize="11" fill={TICK}>
+          {r.name.replace('Sprint ', 'S')}
+        </text>
+      ))}
+
+      <line x1={m.l} x2={m.l} y1={m.t} y2={m.t + ph} stroke={AXIS} />
+      <line x1={m.l} x2={W - m.r} y1={m.t + ph} y2={m.t + ph} stroke={AXIS} />
+    </svg>
+  );
+}
+
+/** Semicircular gauge, 0 to 1.5, banded red / amber / green. */
+function IndexGauge({ label, value, caption }) {
+  const W = 230, H = 150;
+  const cx = W / 2, cy = 120, r = 88;
+  const MAX = 1.5;
+  const polar = (radius, deg) => {
+    const a = ((deg - 180) * Math.PI) / 180;
+    return [cx + radius * Math.cos(a), cy + radius * Math.sin(a)];
+  };
+  const arc = (radius, d0, d1) => {
+    const [x0, y0] = polar(radius, d0);
+    const [x1, y1] = polar(radius, d1);
+    return 'M ' + x0 + ' ' + y0 + ' A ' + radius + ' ' + radius + ' 0 ' + (d1 - d0 > 180 ? 1 : 0) + ' 1 ' + x1 + ' ' + y1;
+  };
+  const deg = (v) => (clamp(v, 0, MAX) / MAX) * 180;
+
+  const ok = isFinite(value) && value > 0;
+  const tone = indexTone(value);
+  const [nx, ny] = polar(r - 14, deg(ok ? value : 0));
+
+  return (
+    <div className="flex flex-col items-center px-2 py-3">
+      <svg viewBox={'0 0 ' + W + ' ' + H} className="h-[150px] w-full max-w-[230px]">
+        <path d={arc(r, 0, deg(0.9))} stroke="#fecaca" strokeWidth="16" fill="none" strokeLinecap="butt" />
+        <path d={arc(r, deg(0.9), deg(1.0))} stroke="#fde68a" strokeWidth="16" fill="none" strokeLinecap="butt" />
+        <path d={arc(r, deg(1.0), 180)} stroke="#a7f3d0" strokeWidth="16" fill="none" strokeLinecap="butt" />
+
+        <line x1={cx} y1={cy} x2={nx} y2={ny} stroke={INDEX_COLOR[tone]} strokeWidth="3.5" strokeLinecap="round" />
+        <circle cx={cx} cy={cy} r="5" fill={INDEX_COLOR[tone]} />
+
+        <text x={polar(r + 14, 0)[0] + 6} y={cy + 4} textAnchor="start" fontSize="10" fill={TICK} className="num">0</text>
+        <text x={polar(r + 14, 180)[0] - 6} y={cy + 4} textAnchor="end" fontSize="10" fill={TICK} className="num">1.5</text>
+        <text x={cx} y={cy - 26} textAnchor="middle" fontSize="34" fontWeight="700" fill={INDEX_COLOR[tone]} className="num">
+          {ok ? value.toFixed(2) : '—'}
+        </text>
+      </svg>
+      <div className="text-[13px] font-semibold uppercase tracking-wide text-slate-600">{label}</div>
+      <div className="mt-0.5 text-center text-[11px] leading-snug text-slate-400">{caption}</div>
+      <div className="mt-1.5">
+        <Chip tone={tone}>
+          {!ok ? 'no data' : value < 0.9 ? 'off track' : value <= 1.0 ? 'watch' : 'on or ahead of plan'}
+        </Chip>
+      </div>
+    </div>
+  );
+}
+
+function HybridEvmTab({ rows, setRows }) {
+  const [selectedId, setSelectedId] = useState(SEED_EVM[SEED_EVM.length - 1].id);
+  const selected = rows.find((r) => r.id === selectedId) || rows[rows.length - 1];
+
+  const withIdx = rows.map((r) => ({
+    ...r,
+    cpi: r.ac > 0 ? r.ev / r.ac : 0,
+    spi: r.pv > 0 ? r.ev / r.pv : 0,
+    cv: r.ev - r.ac,
+    sv: r.ev - r.pv,
+  }));
+  const sel = withIdx.find((r) => r.id === (selected && selected.id)) || withIdx[withIdx.length - 1];
+
+  const totals = {
+    pv: sum(rows.map((r) => r.pv)),
+    ev: sum(rows.map((r) => r.ev)),
+    ac: sum(rows.map((r) => r.ac)),
+  };
+  const cumCpi = totals.ac > 0 ? totals.ev / totals.ac : 0;
+  const cumSpi = totals.pv > 0 ? totals.ev / totals.pv : 0;
+
+  const addSprint = () => {
+    const n = 20 + rows.length;
+    const last = rows[rows.length - 1] || { pv: 0, ev: 0, ac: 0 };
+    const row = { id: uid('EV'), name: 'Sprint ' + n, pv: last.pv, ev: 0, ac: 0 };
+    setRows((all) => [...all, row]);
+    setSelectedId(row.id);
+  };
+
+  return (
+    <div className="space-y-5">
+      <PageHead
+        title="Hybrid EVM"
+        lead="Earned value reporting alongside an agile cadence, for the stakeholders who need cost and schedule indices. Enter PV, EV and AC per sprint from your own budget figures; CPI and SPI are the only things calculated here."
+        right={
+          <>
+            <select value={sel ? sel.id : ''} onChange={(e) => setSelectedId(e.target.value)} className={inputCls}>
+              {rows.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+            </select>
+            <button className={btnCls} onClick={addSprint}>+ Sprint</button>
+          </>
+        }
+      />
+
+      <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] leading-relaxed text-amber-800">
+        <strong>These are manually entered figures.</strong> Nothing on this tab is derived from story points or velocity —
+        PV, EV and AC come from your own budget and progress reporting, in whatever currency unit you use consistently.
+        Story points measure relative effort, not money, and converting between them silently would make the indices
+        look authoritative while meaning nothing.
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,300px)]">
+        <Card title={'PV / EV / AC across ' + rows.length + ' sprints'}>
+          <Legend items={[
+            { color: '#94a3b8', label: 'Planned value (PV)' },
+            { color: '#0d9488', label: 'Earned value (EV)' },
+            { color: '#f59e0b', label: 'Actual cost (AC)' },
+          ]} />
+          <EvmLineChart rows={rows} />
+        </Card>
+
+        <Card title={sel ? sel.name + ' — indices' : 'Indices'}>
+          <div className="divide-y divide-slate-100">
+            <IndexGauge label="CPI" value={sel ? sel.cpi : 0} caption="EV ÷ AC — cost efficiency. Below 1.0 means you are spending more than you are earning." />
+            <IndexGauge label="SPI" value={sel ? sel.spi : 0} caption="EV ÷ PV — schedule efficiency. Below 1.0 means less was earned than planned." />
+          </div>
+          <div className="border-t border-slate-100 bg-slate-50 px-3 py-2 text-[11px] text-slate-500">
+            <div className="flex justify-between"><span>Cost variance (EV − AC)</span><span className={'num font-semibold ' + (sel && sel.cv >= 0 ? 'text-emerald-700' : 'text-red-700')}>{sel ? (sel.cv >= 0 ? '+' : '−') + money(Math.abs(sel.cv)) : '—'}</span></div>
+            <div className="mt-1 flex justify-between"><span>Schedule variance (EV − PV)</span><span className={'num font-semibold ' + (sel && sel.sv >= 0 ? 'text-emerald-700' : 'text-red-700')}>{sel ? (sel.sv >= 0 ? '+' : '−') + money(Math.abs(sel.sv)) : '—'}</span></div>
+          </div>
+        </Card>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <StatCard label="Cumulative PV" value={money(totals.pv)} sub="all sprints entered" />
+        <StatCard label="Cumulative EV" value={money(totals.ev)} sub="all sprints entered" />
+        <StatCard label="Cumulative CPI" value={round2(cumCpi)} sub={'total EV ÷ total AC (' + money(totals.ac) + ')'} tone={indexTone(cumCpi)} />
+        <StatCard label="Cumulative SPI" value={round2(cumSpi)} sub="total EV ÷ total PV" tone={indexTone(cumSpi)} />
+      </div>
+
+      <Card title="Per-sprint entry" right={<span className="text-[11px] text-slate-400">Type into any cell &middot; double-click a sprint name to rename</span>}>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[720px] text-[13px]">
+            <thead>
+              <tr className="border-b border-slate-100 text-[11px] uppercase tracking-wide text-slate-400">
+                <th className="px-3 py-2 text-left font-semibold">Sprint</th>
+                <th className="px-2 py-2 text-right font-semibold">Planned value</th>
+                <th className="px-2 py-2 text-right font-semibold">Earned value</th>
+                <th className="px-2 py-2 text-right font-semibold">Actual cost</th>
+                <th className="px-2 py-2 text-right font-semibold">CPI</th>
+                <th className="px-2 py-2 text-right font-semibold">SPI</th>
+                <th className="w-8" />
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {withIdx.map((r) => (
+                <tr
+                  key={r.id}
+                  onClick={() => setSelectedId(r.id)}
+                  className={'group cursor-pointer ' + (sel && r.id === sel.id ? 'bg-teal-50/60' : 'hover:bg-slate-50')}
+                >
+                  <td className="px-3 py-1.5 font-medium text-slate-700">
+                    <Editable value={r.name} onChange={(v) => setRows((all) => upd(all, r.id, { name: v }))} className="px-1" />
+                  </td>
+                  <td className="px-2 py-1.5 text-right"><NumField value={r.pv} step={500} min={0} width="w-28" onChange={(v) => setRows((all) => upd(all, r.id, { pv: v }))} /></td>
+                  <td className="px-2 py-1.5 text-right"><NumField value={r.ev} step={500} min={0} width="w-28" onChange={(v) => setRows((all) => upd(all, r.id, { ev: v }))} /></td>
+                  <td className="px-2 py-1.5 text-right"><NumField value={r.ac} step={500} min={0} width="w-28" onChange={(v) => setRows((all) => upd(all, r.id, { ac: v }))} /></td>
+                  <td className="px-2 py-1.5 text-right">
+                    <Chip tone={indexTone(r.cpi)}><span className="num">{r.ac > 0 ? r.cpi.toFixed(2) : '—'}</span></Chip>
+                  </td>
+                  <td className="px-2 py-1.5 text-right">
+                    <Chip tone={indexTone(r.spi)}><span className="num">{r.pv > 0 ? r.spi.toFixed(2) : '—'}</span></Chip>
+                  </td>
+                  <td className="pr-2 text-right">
+                    <span className="opacity-0 transition group-hover:opacity-100">
+                      <XBtn onClick={(e) => { e.stopPropagation(); setRows((all) => rm(all, r.id)); }} />
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr className="border-t border-slate-200 bg-slate-50 text-[12px] font-semibold text-slate-600">
+                <td className="px-3 py-2">Total</td>
+                <td className="num px-2 py-2 text-right">{money(totals.pv)}</td>
+                <td className="num px-2 py-2 text-right">{money(totals.ev)}</td>
+                <td className="num px-2 py-2 text-right">{money(totals.ac)}</td>
+                <td className="num px-2 py-2 text-right">{round2(cumCpi)}</td>
+                <td className="num px-2 py-2 text-right">{round2(cumSpi)}</td>
+                <td />
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </Card>
+
+      <FootNote>
+        PV, EV and AC are entered by hand and are never inferred from story points, velocity or the boards on the other
+        tabs. Only CPI (EV ÷ AC) and SPI (EV ÷ PV) are calculated, per sprint and cumulatively; a sprint with a zero
+        denominator shows a dash rather than a misleading index. The gauge bands follow the common convention — red below
+        0.90, amber from 0.90 to 1.00, green above 1.00 — and the gauge itself is clipped at 1.5 for readability, so an
+        exceptional index still parks the needle at the far right.
+      </FootNote>
+    </div>
+  );
+}
+
+/* ==========================================================================
+   TAB 5 — CUMULATIVE FLOW / BOTTLENECK FINDER
+   The board's column history, sampled per day into a CFD, plus the Theory of
+   Constraints question: which column is the work actually waiting in?
+   ========================================================================== */
+
+const SEED_COLUMNS = [
+  { id: 'todo', name: 'To Do' },
+  { id: 'inprog', name: 'In Progress' },
+  { id: 'review', name: 'Review' },
+  { id: 'done', name: 'Done' },
+];
+
+/** entries: [[columnId, daysAgo], ...] oldest first. */
+const flow = (id, title, entries) => {
+  const history = entries.map(([columnId, d]) => ({ columnId, at: ago(d) }));
+  const last = history[history.length - 1];
+  return { id, title, history, columnId: last.columnId, enteredColumnAt: last.at };
+};
+
+const SEED_FLOW_STORIES = [
+  flow('S-401', 'Checkout: apply promo code at the payment step', [['todo', 13], ['inprog', 11], ['review', 9], ['done', 3]]),
+  flow('S-402', 'Invoice PDF layout for EU VAT', [['todo', 13], ['inprog', 10], ['review', 7], ['done', 2]]),
+  flow('S-403', 'Dark mode for the settings screen', [['todo', 13], ['inprog', 10], ['review', 7]]),
+  flow('S-404', 'Bulk refund tooling for support agents', [['todo', 13], ['inprog', 8]]),
+  flow('S-405', 'Rate-limit the public API', [['todo', 13], ['inprog', 12], ['review', 10], ['done', 8]]),
+  flow('S-406', 'Password reset email throttling', [['todo', 13], ['inprog', 12], ['review', 11], ['done', 9]]),
+  flow('S-407', 'Search: fuzzy match on product names', [['todo', 12], ['inprog', 8], ['review', 5]]),
+  flow('S-408', 'Wishlist sharing links', [['todo', 12], ['inprog', 7], ['review', 3]]),
+  flow('S-409', 'Order history pagination', [['todo', 11], ['inprog', 9], ['review', 6], ['done', 1]]),
+  flow('S-410', 'Accessibility pass on the main navigation', [['todo', 11], ['inprog', 5]]),
+  flow('S-411', 'Session timeout warning modal', [['todo', 10], ['inprog', 5], ['review', 2]]),
+  flow('S-412', 'Migrate the session store to Redis', [['todo', 9], ['inprog', 3]]),
+  flow('S-413', 'Customer address book CRUD', [['todo', 7]]),
+  flow('S-414', 'Email template localisation (RO / EN)', [['todo', 5]]),
+  flow('S-415', 'Fix broken breadcrumb on category pages', [['todo', 3]]),
+];
+
+const FLOW_PALETTE = ['#cbd5e1', '#7dd3fc', '#fcd34d', '#5eead4', '#c4b5fd', '#fda4af', '#a3e635', '#fdba74'];
+const colColor = (i) => FLOW_PALETTE[i % FLOW_PALETTE.length];
+
+/** Which column a story sat in on a given day, or null if it had not started. */
+const columnOnDay = (story, dayISO) => {
+  let col = null;
+  story.history.forEach((h) => { if (h.at <= dayISO) col = h.columnId; });
+  return col;
+};
+
+function CfdChart({ days, columns, counts }) {
+  const W = 820, H = 320;
+  const m = { l: 40, r: 16, t: 16, b: 40 };
+  const pw = W - m.l - m.r, ph = H - m.t - m.b;
+  const maxY = Math.max(1, ...days.map((_, i) => sum(columns.map((c) => counts[c.id][i])))) * 1.1;
+  const yTicks = niceTicks(maxY, 5);
+  const step = days.length > 1 ? pw / (days.length - 1) : 0;
+  const x = (i) => (days.length === 1 ? m.l + pw / 2 : m.l + i * step);
+  const y = (v) => m.t + ph - (v / maxY) * ph;
+
+  // stacked bottom-up: last column (usually Done) sits at the bottom
+  const stackOrder = [...columns].reverse();
+  const lower = days.map(() => 0);
+  const bands = stackOrder.map((c) => {
+    const top = days.map((_, i) => lower[i] + counts[c.id][i]);
+    const band = { col: c, lower: [...lower], upper: top };
+    top.forEach((v, i) => { lower[i] = v; });
+    return band;
+  });
+
+  const labelEvery = Math.max(1, Math.ceil(days.length / 8));
+
+  return (
+    <svg viewBox={'0 0 ' + W + ' ' + H} className="h-[320px] w-full" preserveAspectRatio="xMidYMid meet">
+      {yTicks.map((t) => (
+        <g key={t}>
+          <line x1={m.l} x2={W - m.r} y1={y(t)} y2={y(t)} stroke={GRID} strokeWidth="1" />
+          <text x={m.l - 8} y={y(t) + 4} textAnchor="end" fontSize="11" fill={TICK} className="num">{t}</text>
+        </g>
+      ))}
+
+      {bands.map((b) => {
+        const idx = columns.findIndex((c) => c.id === b.col.id);
+        const top = b.upper.map((v, i) => x(i) + ',' + y(v)).join(' ');
+        const bottom = b.lower.map((v, i) => x(i) + ',' + y(v)).reverse().join(' ');
+        return (
+          <polygon key={b.col.id} points={top + ' ' + bottom} fill={colColor(idx)} fillOpacity="0.9" stroke="#fff" strokeWidth="0.6">
+            <title>{b.col.name}</title>
+          </polygon>
+        );
+      })}
+
+      {days.map((d, i) => (i % labelEvery === 0 || i === days.length - 1 ? (
+        <text key={d} x={x(i)} y={H - 16} textAnchor="middle" fontSize="10" fill={TICK}>{shortDate(d)}</text>
+      ) : null))}
+
+      <line x1={m.l} x2={m.l} y1={m.t} y2={m.t + ph} stroke={AXIS} />
+      <line x1={m.l} x2={W - m.r} y1={m.t + ph} y2={m.t + ph} stroke={AXIS} />
+      <text x={12} y={m.t + ph / 2} textAnchor="middle" fontSize="11" fill={TICK} transform={'rotate(-90 12 ' + (m.t + ph / 2) + ')'}>
+        stories
+      </text>
+    </svg>
+  );
+}
+
+function CumulativeFlowTab({ columns, setColumns, stories, setStories, sprintStart, setSprintStart }) {
+  const [newCol, setNewCol] = useState('');
+  const [newStory, setNewStory] = useState('');
+
+  const days = useMemo(() => dayRange(sprintStart, TODAY_ISO), [sprintStart]);
+
+  /** counts[columnId][dayIndex] — derived purely from the entered-column dates. */
+  const counts = useMemo(() => {
+    const out = {};
+    columns.forEach((c) => { out[c.id] = days.map(() => 0); });
+    days.forEach((d, i) => {
+      stories.forEach((s) => {
+        const col = columnOnDay(s, d);
+        if (col && out[col]) out[col][i] += 1;
+      });
+    });
+    return out;
+  }, [columns, stories, days]);
+
+  /** Average dwell per column, in calendar days. Open spells count up to today. */
+  const dwell = useMemo(() => {
+    const acc = {};
+    columns.forEach((c) => { acc[c.id] = { total: 0, samples: 0, open: 0 }; });
+    stories.forEach((s) => {
+      s.history.forEach((h, i) => {
+        const exit = s.history[i + 1] ? s.history[i + 1].at : TODAY_ISO;
+        if (!acc[h.columnId]) return;
+        acc[h.columnId].total += Math.max(0, calDays(h.at, exit));
+        acc[h.columnId].samples += 1;
+        if (!s.history[i + 1]) acc[h.columnId].open += 1;
+      });
+    });
+    return columns.map((c) => ({
+      ...c,
+      avg: acc[c.id].samples ? acc[c.id].total / acc[c.id].samples : 0,
+      samples: acc[c.id].samples,
+      open: acc[c.id].open,
+      wip: stories.filter((s) => s.columnId === c.id).length,
+    }));
+  }, [columns, stories]);
+
+  /**
+   * Only the columns doing work can be the constraint. The last column is
+   * terminal — time in Done is finished work, not a queue — and the first is
+   * the intake queue, where dwell measures backlog age rather than a process
+   * that cannot keep up. On a board too short for that, fall back to
+   * everything except the terminal column.
+   */
+  const active = dwell.slice(1, -1);
+  const candidates = active.length ? active : dwell.slice(0, Math.max(1, dwell.length - 1));
+  const excludedIds = dwell.filter((c) => !candidates.some((x) => x.id === c.id)).map((c) => c.id);
+  const constraint = candidates.reduce((best, c) => (!best || c.avg > best.avg ? c : best), null);
+  const secondWorst = candidates.filter((c) => !constraint || c.id !== constraint.id)
+    .reduce((best, c) => (!best || c.avg > best.avg ? c : best), null);
+
+  const throughput = stories.filter((s) => s.columnId === columns[columns.length - 1].id).length;
+  const totalWip = stories.length - throughput;
+
+  const moveStory = (storyId, columnId) =>
+    setStories((all) => upd(all, storyId, (s) => (
+      s.columnId === columnId ? s : {
+        columnId,
+        enteredColumnAt: TODAY_ISO,
+        history: [...s.history, { columnId, at: TODAY_ISO }],
+      }
+    )));
+
+  /** Editing the entered date rewrites the last history entry — that is the same fact. */
+  const setEnteredAt = (storyId, at) =>
+    setStories((all) => upd(all, storyId, (s) => {
+      const history = s.history.slice();
+      history[history.length - 1] = { ...history[history.length - 1], at };
+      return { enteredColumnAt: at, history };
+    }));
+
+  const addColumn = () => {
+    const name = newCol.trim();
+    if (!name) return;
+    const col = { id: uid('col'), name };
+    setColumns((all) => [...all.slice(0, -1), col, all[all.length - 1]]);
+    setNewCol('');
+  };
+
+  const removeColumn = (id) => {
+    if (columns.length <= 2) return;
+    const remaining = columns.filter((c) => c.id !== id);
+    setColumns(remaining);
+    setStories((all) => all.map((s) => {
+      const history = s.history.filter((h) => h.columnId !== id);
+      const safe = history.length ? history : [{ columnId: remaining[0].id, at: s.history[0].at }];
+      const last = safe[safe.length - 1];
+      return { ...s, history: safe, columnId: last.columnId, enteredColumnAt: last.at };
+    }));
+  };
+
+  const addStory = () => {
+    const title = newStory.trim();
+    if (!title) return;
+    const nums = stories.map((s) => Number(String(s.id).replace(/\D/g, '')) || 0);
+    const id = 'S-' + (Math.max(400, ...nums) + 1);
+    setStories((all) => [...all, {
+      id, title,
+      columnId: columns[0].id,
+      enteredColumnAt: TODAY_ISO,
+      history: [{ columnId: columns[0].id, at: TODAY_ISO }],
+    }]);
+    setNewStory('');
+  };
+
+  return (
+    <div className="space-y-5">
+      <PageHead
+        title="Cumulative Flow / Bottleneck Finder"
+        lead="A cumulative flow diagram built from each story's column history, and the constraint that follows from it. A widening band is work arriving faster than it leaves — that column, not the busiest person, is what sets the team's pace."
+        right={
+          <label className="flex items-center gap-2 text-[12px] text-slate-500">
+            Sprint start
+            <input type="date" value={sprintStart} max={TODAY_ISO} onChange={(e) => setSprintStart(e.target.value)} className={inputCls + ' num'} />
+          </label>
+        }
+      />
+
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <StatCard label="Stories on the board" value={stories.length} sub={days.length + ' days sampled'} />
+        <StatCard label="Work in progress" value={totalWip} sub={'not yet in ' + columns[columns.length - 1].name} />
+        <StatCard label="Completed" value={throughput} sub={'in ' + columns[columns.length - 1].name} tone="green" />
+        <StatCard
+          label="Current constraint"
+          value={constraint ? constraint.name : '—'}
+          sub={constraint ? round1(constraint.avg) + ' days average dwell' : 'no data'}
+          tone="red"
+        />
+      </div>
+
+      <Card title="Cumulative flow diagram">
+        <Legend items={columns.map((c, i) => ({ color: colColor(i), label: c.name }))} />
+        <CfdChart days={days} columns={columns} counts={counts} />
+        <p className="px-3 pb-3 text-[11px] text-slate-400">
+          Bands are stacked with {columns[columns.length - 1].name} at the bottom. The vertical thickness of a band on any
+          given day is the number of stories sitting in that column; a band that keeps widening left to right is filling
+          faster than it drains.
+        </p>
+      </Card>
+
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,340px)]">
+        <Card title="Dwell time by column">
+          <ul className="divide-y divide-slate-100">
+            {dwell.map((c, i) => {
+              const isConstraint = constraint && c.id === constraint.id;
+              const maxAvg = Math.max(1, ...dwell.map((d) => d.avg));
+              const terminal = i === dwell.length - 1;
+              return (
+                <li key={c.id} className={'group px-3 py-2.5 ' + (isConstraint ? 'bg-red-50/50' : '')}>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="inline-block h-3 w-3 shrink-0 rounded-sm" style={{ background: colColor(i) }} />
+                    <span className="min-w-0 flex-1 text-[13px] font-medium text-slate-700">
+                      <Editable value={c.name} onChange={(v) => setColumns((all) => upd(all, c.id, { name: v }))} className="px-1" />
+                    </span>
+                    {isConstraint && <Chip tone="red">constraint</Chip>}
+                    {excludedIds.indexOf(c.id) !== -1 && (
+                      <Chip tone="slate" title={terminal ? 'Finished work, not a queue' : 'Intake queue — dwell here is backlog age'}>
+                        {terminal ? 'terminal' : 'intake'} &middot; not scanned
+                      </Chip>
+                    )}
+                    <span className="num text-[13px] font-semibold text-slate-700">{round1(c.avg)} d</span>
+                    <span className="opacity-0 transition group-hover:opacity-100">
+                      <XBtn onClick={() => removeColumn(c.id)} title="Remove column" />
+                    </span>
+                  </div>
+                  <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-slate-100">
+                    <div
+                      className="h-full rounded-full"
+                      style={{ width: Math.round((c.avg / maxAvg) * 100) + '%', background: isConstraint ? '#dc2626' : colColor(i) }}
+                    />
+                  </div>
+                  <div className="mt-1 text-[11px] text-slate-400">
+                    <span className="num">{c.wip}</span> here now &middot; <span className="num">{c.samples}</span> visit
+                    {c.samples === 1 ? '' : 's'} recorded, <span className="num">{c.open}</span> still open
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+          <div className="no-print flex items-center gap-2 border-t border-slate-100 bg-slate-50 px-3 py-2">
+            <input
+              value={newCol}
+              onChange={(e) => setNewCol(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && addColumn()}
+              placeholder="New column, e.g. Ready for QA"
+              className={inputCls + ' flex-1'}
+            />
+            <button className={btnCls} onClick={addColumn}>Add column</button>
+          </div>
+        </Card>
+
+        <Card title="Theory of constraints read">
+          {constraint ? (
+            <div className="space-y-3 px-3 py-3 text-[13px] leading-relaxed text-slate-600">
+              <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-red-600">Current constraint</div>
+                <div className="mt-0.5 text-lg font-bold text-red-700">{constraint.name}</div>
+                <div className="num mt-0.5 text-[12px] text-red-600">
+                  {round1(constraint.avg)} days average dwell &middot; {constraint.wip} stories sitting there now
+                </div>
+              </div>
+              <p>
+                Work spends longer in <strong>{constraint.name}</strong> than in any other active column
+                {secondWorst && secondWorst.avg > 0 && (
+                  <> — <span className="num">{round1(constraint.avg / Math.max(secondWorst.avg, 0.1))}&#215;</span> the dwell of {secondWorst.name}, the next slowest</>
+                )}
+                . Until that changes, speeding up any other column just grows the queue in front of this one.
+              </p>
+              <ul className="list-disc space-y-1 pl-4 text-[12px]">
+                <li>Cap WIP <em>upstream</em> of {constraint.name} rather than adding more work to it.</li>
+                <li>Ask what {constraint.name} is waiting on — people, an environment, or an approval.</li>
+                <li>Swarm the oldest item in {constraint.name} before pulling anything new.</li>
+              </ul>
+              <p className="text-[11px] text-slate-400">
+                Only working columns are scanned. {columns[columns.length - 1].name} is terminal — time there is completed
+                work — and {columns[0].name} is the intake queue, where a long dwell means the backlog is ageing rather
+                than that a stage cannot keep up.
+              </p>
+            </div>
+          ) : (
+            <Empty>Not enough column history to name a constraint.</Empty>
+          )}
+        </Card>
+      </div>
+
+      <Card title="Board" right={<span className="text-[11px] text-slate-400">Move a story to stamp today's date onto its history</span>}>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[720px] text-[13px]">
+            <thead>
+              <tr className="border-b border-slate-100 text-[11px] uppercase tracking-wide text-slate-400">
+                <th className="px-3 py-2 text-left font-semibold">Story</th>
+                <th className="px-2 py-2 text-left font-semibold">Column</th>
+                <th className="px-2 py-2 text-left font-semibold">Entered column at</th>
+                <th className="px-2 py-2 text-right font-semibold">Days here</th>
+                <th className="px-2 py-2 text-left font-semibold">Path</th>
+                <th className="w-8" />
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {stories.map((s) => {
+                const here = calDays(s.enteredColumnAt, TODAY_ISO);
+                const isTerminal = s.columnId === columns[columns.length - 1].id;
+                const stuck = !isTerminal && constraint && s.columnId === constraint.id && here >= Math.ceil(constraint.avg);
+                return (
+                  <tr key={s.id} className={'group ' + (stuck ? 'bg-red-50/40' : 'hover:bg-slate-50')}>
+                    <td className="px-3 py-1.5">
+                      <div className="flex items-baseline gap-2">
+                        <span className="num shrink-0 text-[11px] font-semibold text-slate-400">{s.id}</span>
+                        <span className="min-w-0 text-slate-700">
+                          <Editable value={s.title} onChange={(v) => setStories((all) => upd(all, s.id, { title: v }))} className="px-1" />
+                        </span>
+                      </div>
+                    </td>
+                    <td className="px-2 py-1.5">
+                      <select value={s.columnId} onChange={(e) => moveStory(s.id, e.target.value)} className={inputCls + ' py-0.5 text-[12px]'}>
+                        {columns.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                      </select>
+                    </td>
+                    <td className="px-2 py-1.5">
+                      <input type="date" value={s.enteredColumnAt} onChange={(e) => setEnteredAt(s.id, e.target.value)} className={inputCls + ' num py-0.5 text-[12px]'} />
+                    </td>
+                    <td className={'num px-2 py-1.5 text-right ' + (stuck ? 'font-semibold text-red-700' : 'text-slate-600')}>
+                      {here}
+                      {stuck && <span className="ml-1 text-[10px] uppercase">stuck</span>}
+                    </td>
+                    <td className="px-2 py-1.5 text-[11px] text-slate-400">
+                      {s.history.map((h) => {
+                        const c = columns.find((x) => x.id === h.columnId);
+                        return (c ? c.name : h.columnId) + ' ' + shortDate(h.at);
+                      }).join('  →  ')}
+                    </td>
+                    <td className="pr-2 text-right">
+                      <span className="opacity-0 transition group-hover:opacity-100">
+                        <XBtn onClick={() => setStories((all) => rm(all, s.id))} />
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <div className="no-print flex items-center gap-2 border-t border-slate-100 bg-slate-50 px-3 py-2">
+          <input
+            value={newStory}
+            onChange={(e) => setNewStory(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && addStory()}
+            placeholder={'New story — enters ' + columns[0].name + ' today'}
+            className={inputCls + ' flex-1'}
+          />
+          <button className={btnCls} onClick={addStory}>+ Story</button>
+        </div>
+      </Card>
+
+      <FootNote>
+        the daily snapshot is <strong>derived from each story's entered-column dates, not from live tracking</strong>. A
+        story is counted in whichever column it last entered on or before that day, so a card that moved twice in one day
+        only registers its final position, and a card moved late without correcting the date will shift history when you
+        fix it. Dwell time is calendar days, weekends included, and a spell that has not ended yet counts up to today —
+        which means an idle board slowly inflates its own constraint. The constraint scan covers the working columns only:
+        the first column is treated as the intake queue and the last as terminal, so neither is ever nominated — on a
+        two-column board that rule relaxes to excluding the terminal column alone.
+      </FootNote>
+    </div>
+  );
+}
+
+/* ==========================================================================
+   TAB 6 — TEAM HEALTH CHECK-IN (ANONYMOUS)
+   Sentiment is stored as per-day counts only. There is no author field on a
+   check-in anywhere in this model, so no view can ever attribute one.
+   ========================================================================== */
+
+const MOOD = [
+  { score: 1, face: '\u{1F61E}', label: 'Rough' },
+  { score: 2, face: '\u{1F641}', label: 'Strained' },
+  { score: 3, face: '\u{1F610}', label: 'Okay' },
+  { score: 4, face: '\u{1F642}', label: 'Good' },
+  { score: 5, face: '\u{1F604}', label: 'Great' },
+];
+
+/** counts[i] is the number of anonymous submissions that chose score i+1. */
+const mood = (daysAgo, counts) => ({ id: uid('m'), date: ago(daysAgo), counts });
+
+const SEED_SENTIMENT = [
+  mood(9, [0, 1, 2, 4, 1]),
+  mood(8, [0, 0, 3, 4, 1]),
+  mood(7, [0, 1, 3, 3, 1]),
+  mood(6, [1, 2, 3, 2, 0]),
+  mood(5, [1, 2, 4, 1, 0]),
+  mood(4, [0, 1, 4, 3, 0]),
+  mood(3, [0, 1, 2, 4, 1]),
+  mood(2, [0, 0, 2, 4, 2]),
+  mood(1, [0, 0, 2, 5, 1]),
+  mood(0, [0, 1, 1, 4, 2]),
+];
+
+const SEED_SWARMS = [
+  { id: uid('sw'), storyRef: 'S-402', note: 'VAT rounding disagreed with the finance export', people: 5, startedAt: agoAt(9, '11:00'), resolvedAt: agoAt(8, '15:00') },
+  { id: uid('sw'), storyRef: 'S-407', note: 'Search index rebuild timed out on the staging dataset', people: 4, startedAt: agoAt(6, '09:30'), resolvedAt: agoAt(6, '16:00') },
+  { id: uid('sw'), storyRef: 'S-404', note: 'Refund webhook double-firing against the payment provider', people: 3, startedAt: agoAt(4, '14:00'), resolvedAt: agoAt(3, '11:30') },
+  { id: uid('sw'), storyRef: 'S-411', note: 'Session timeout modal fired on active tabs', people: 2, startedAt: agoAt(2, '10:00'), resolvedAt: agoAt(2, '12:45') },
+];
+
+const dayAvg = (counts) => {
+  const n = sum(counts);
+  return n ? sum(counts.map((c, i) => c * (i + 1))) / n : 0;
+};
+const hoursBetween = (a, b) => {
+  const ms = new Date(b) - new Date(a);
+  return isFinite(ms) ? ms / 3600000 : 0;
+};
+const durationLabel = (h) => (h < 24 ? round1(h) + ' h' : round1(h / 24) + ' d (' + Math.round(h) + ' h)');
+
+function SentimentChart({ rows }) {
+  const W = 780, H = 260;
+  const m = { l: 42, r: 18, t: 18, b: 42 };
+  const pw = W - m.l - m.r, ph = H - m.t - m.b;
+  const step = rows.length > 1 ? pw / (rows.length - 1) : 0;
+  const x = (i) => (rows.length === 1 ? m.l + pw / 2 : m.l + i * step);
+  const y = (v) => m.t + ph - ((clamp(v, 1, 5) - 1) / 4) * ph;
+  const mean = avg(rows.filter((r) => r.n > 0).map((r) => r.avg));
+  const labelEvery = Math.max(1, Math.ceil(rows.length / 10));
+
+  return (
+    <svg viewBox={'0 0 ' + W + ' ' + H} className="h-[260px] w-full" preserveAspectRatio="xMidYMid meet">
+      {[1, 2, 3, 4, 5].map((t) => (
+        <g key={t}>
+          <line x1={m.l} x2={W - m.r} y1={y(t)} y2={y(t)} stroke={GRID} strokeWidth="1" />
+          <text x={m.l - 8} y={y(t) + 4} textAnchor="end" fontSize="11" fill={TICK} className="num">{t}</text>
+        </g>
+      ))}
+
+      {mean > 0 && (
+        <>
+          <line x1={m.l} x2={W - m.r} y1={y(mean)} y2={y(mean)} stroke="#94a3b8" strokeWidth="1.5" strokeDasharray="5 4" />
+          <text x={W - m.r} y={y(mean) - 6} textAnchor="end" fontSize="10" fill="#94a3b8" className="num">sprint mean {round2(mean)}</text>
+        </>
+      )}
+
+      <polyline
+        points={rows.filter((r) => r.n > 0).map((r) => x(rows.indexOf(r)) + ',' + y(r.avg)).join(' ')}
+        fill="none" stroke="#0d9488" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"
+      />
+
+      {rows.map((r, i) => (r.n > 0 ? (
+        <g key={r.id}>
+          <circle cx={x(i)} cy={y(r.avg)} r={4 + Math.min(4, r.n * 0.35)} fill="#0d9488" fillOpacity="0.85" stroke="#fff" strokeWidth="1.5">
+            <title>{shortDate(r.date) + ' — average ' + round2(r.avg) + ' from ' + r.n + ' anonymous check-ins'}</title>
+          </circle>
+          <text x={x(i)} y={y(r.avg) - 12} textAnchor="middle" fontSize="10" fill="#0f766e" fontWeight="700" className="num">{round1(r.avg)}</text>
+        </g>
+      ) : null))}
+
+      {rows.map((r, i) => (i % labelEvery === 0 || i === rows.length - 1 ? (
+        <text key={r.id + '-l'} x={x(i)} y={H - 18} textAnchor="middle" fontSize="10" fill={TICK}>{shortDate(r.date)}</text>
+      ) : null))}
+
+      <line x1={m.l} x2={m.l} y1={m.t} y2={m.t + ph} stroke={AXIS} />
+      <line x1={m.l} x2={W - m.r} y1={m.t + ph} y2={m.t + ph} stroke={AXIS} />
+      <text x={12} y={m.t + ph / 2} textAnchor="middle" fontSize="11" fill={TICK} transform={'rotate(-90 12 ' + (m.t + ph / 2) + ')'}>
+        average mood
+      </text>
+    </svg>
+  );
+}
+
+function TeamHealthTab({ sentiment, setSentiment, swarms, setSwarms }) {
+  const [checkinDate, setCheckinDate] = useState(TODAY_ISO);
+  const [justSubmitted, setJustSubmitted] = useState(null);
+  const [draft, setDraft] = useState({ storyRef: '', note: '', people: 3, startedAt: agoAt(0, '10:00'), resolvedAt: agoAt(0, '14:00') });
+
+  const rows = useMemo(
+    () => sentiment
+      .slice()
+      .sort((a, b) => (a.date < b.date ? -1 : 1))
+      .map((d) => ({ ...d, n: sum(d.counts), avg: dayAvg(d.counts) })),
+    [sentiment]
+  );
+
+  const submit = (score) => {
+    setSentiment((all) => {
+      const existing = all.find((d) => d.date === checkinDate);
+      if (existing) {
+        return all.map((d) => (d.date === checkinDate
+          ? { ...d, counts: d.counts.map((c, i) => (i === score - 1 ? c + 1 : c)) }
+          : d));
+      }
+      const counts = [0, 0, 0, 0, 0];
+      counts[score - 1] = 1;
+      return [...all, { id: uid('m'), date: checkinDate, counts }];
+    });
+    setJustSubmitted(score);
+    setTimeout(() => setJustSubmitted(null), 1600);
+  };
+
+  const withDuration = swarms
+    .map((s) => ({ ...s, hours: hoursBetween(s.startedAt, s.resolvedAt) }))
+    .sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1));
+
+  const responded = rows.filter((r) => r.n > 0);
+  const latest = responded[responded.length - 1];
+  const prev = responded[responded.length - 2];
+  const delta = latest && prev ? round2(latest.avg - prev.avg) : 0;
+  const totalCheckins = sum(rows.map((r) => r.n));
+  const sprintMean = avg(responded.map((r) => r.avg));
+  const lowDays = responded.filter((r) => r.avg < 3).length;
+  const swarmMeanHours = avg(withDuration.map((s) => s.hours));
+
+  const addSwarm = () => {
+    if (!draft.storyRef.trim()) return;
+    setSwarms((all) => [...all, { ...draft, id: uid('sw'), storyRef: draft.storyRef.trim(), note: draft.note.trim() }]);
+    setDraft((d) => ({ ...d, storyRef: '', note: '' }));
+  };
+
+  return (
+    <div className="space-y-5">
+      <PageHead
+        title="Team Health Check-in"
+        lead="An anonymous read on how the sprint actually feels, next to the swarm log that often explains it. Check-ins are stored as daily counts only — there is no name, initial or identifier attached to a submission anywhere in this model."
+      />
+
+      <div className="rounded-lg border border-teal-200 bg-teal-50 px-3 py-2 text-[12px] leading-relaxed text-teal-900">
+        <strong>Anonymous by construction.</strong> A submission increments a counter for a day and a score, and nothing
+        else is recorded. Because individual responses are never stored, they cannot be filtered, sorted or traced back —
+        not by this UI, and not by anything reading the data. On very small teams remember that a single distinctive
+        score can still be recognisable in the aggregate, so treat a one-person shift as a prompt for a conversation, not
+        a finding.
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <StatCard
+          label="Latest daily average"
+          value={latest ? round2(latest.avg) : '—'}
+          sub={latest ? shortDate(latest.date) + ' · ' + latest.n + ' check-ins' : 'no submissions yet'}
+          tone={latest ? (latest.avg >= 3.5 ? 'green' : latest.avg >= 2.75 ? 'amber' : 'red') : 'slate'}
+        />
+        <StatCard
+          label="Movement on the day before"
+          value={(delta > 0 ? '+' : delta < 0 ? '−' : '') + Math.abs(delta).toFixed(2)}
+          sub={delta > 0 ? 'improving' : delta < 0 ? 'dropping' : 'holding steady'}
+          tone={delta > 0.1 ? 'green' : delta < -0.1 ? 'red' : 'slate'}
+        />
+        <StatCard label="Sprint mean" value={round2(sprintMean)} sub={totalCheckins + ' check-ins over ' + responded.length + ' days'} tone="teal" />
+        <StatCard label="Days below 3.0" value={lowDays} sub="worth a look in the retro" tone={lowDays >= 2 ? 'amber' : 'slate'} />
+      </div>
+
+      <Card
+        className="no-print"
+        title="Submit a check-in"
+        right={
+          <label className="flex items-center gap-2 text-[12px] text-slate-500">
+            for
+            <input type="date" value={checkinDate} max={TODAY_ISO} onChange={(e) => setCheckinDate(e.target.value)} className={inputCls + ' num'} />
+          </label>
+        }
+      >
+        <div className="flex flex-wrap items-center justify-center gap-3 px-3 py-4">
+          {MOOD.map((m) => (
+            <button
+              key={m.score}
+              onClick={() => submit(m.score)}
+              className={
+                'flex w-[104px] flex-col items-center gap-1 rounded-lg border px-2 py-3 transition ' +
+                (justSubmitted === m.score
+                  ? 'border-teal-500 bg-teal-50 ring-2 ring-teal-200'
+                  : 'border-slate-200 bg-white hover:border-teal-400 hover:bg-teal-50/40')
+              }
+            >
+              <span className="text-3xl leading-none">{m.face}</span>
+              <span className="text-[12px] font-semibold text-slate-600">{m.label}</span>
+              <span className="num text-[11px] text-slate-400">{m.score}</span>
+            </button>
+          ))}
+        </div>
+        <div className="border-t border-slate-100 bg-slate-50 px-3 py-2 text-center text-[11px] text-slate-500">
+          {justSubmitted
+            ? 'Recorded anonymously for ' + shortDate(checkinDate) + '. Nothing about who submitted it was stored.'
+            : 'One tap per person. Submissions are counted, never attributed.'}
+        </div>
+      </Card>
+
+      <Card title="Sentiment trend across the sprint">
+        <SentimentChart rows={rows} />
+        <div className="overflow-x-auto border-t border-slate-100">
+          <table className="w-full min-w-[620px] text-[12px]">
+            <thead>
+              <tr className="border-b border-slate-100 text-[11px] uppercase tracking-wide text-slate-400">
+                <th className="px-3 py-2 text-left font-semibold">Day</th>
+                {MOOD.map((m) => (
+                  <th key={m.score} className="px-2 py-2 text-center font-semibold" title={m.label}>
+                    <span className="text-base">{m.face}</span>
+                  </th>
+                ))}
+                <th className="px-2 py-2 text-right font-semibold">Responses</th>
+                <th className="px-3 py-2 text-right font-semibold">Average</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {rows.map((r) => (
+                <tr key={r.id} className="hover:bg-slate-50">
+                  <td className="px-3 py-1.5 text-slate-600">{shortDate(r.date)}</td>
+                  {r.counts.map((c, i) => (
+                    <td key={i} className="px-2 py-1.5 text-center">
+                      <input
+                        type="number" min="0" value={c}
+                        onChange={(e) => setSentiment((all) => upd(all, r.id, (d) => ({
+                          counts: d.counts.map((v, k) => (k === i ? Math.max(0, Number(e.target.value) || 0) : v)),
+                        })))}
+                        className={inputCls + ' num w-14 py-0.5 text-center text-[12px]'}
+                      />
+                    </td>
+                  ))}
+                  <td className="num px-2 py-1.5 text-right text-slate-500">{r.n}</td>
+                  <td className={'num px-3 py-1.5 text-right font-semibold ' + (r.n === 0 ? 'text-slate-300' : r.avg < 3 ? 'text-red-700' : r.avg >= 3.5 ? 'text-emerald-700' : 'text-amber-700')}>
+                    {r.n ? round2(r.avg) : '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      <Card
+        title="Swarm events"
+        right={
+          <span className="text-[11px] text-slate-400">
+            Mean resolution <span className="num font-semibold text-slate-600">{durationLabel(swarmMeanHours || 0)}</span> across {withDuration.length} events
+          </span>
+        }
+      >
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[820px] text-[13px]">
+            <thead>
+              <tr className="border-b border-slate-100 text-[11px] uppercase tracking-wide text-slate-400">
+                <th className="px-3 py-2 text-left font-semibold">Story</th>
+                <th className="px-2 py-2 text-left font-semibold">What was swarmed</th>
+                <th className="px-2 py-2 text-right font-semibold">People</th>
+                <th className="px-2 py-2 text-left font-semibold">Started</th>
+                <th className="px-2 py-2 text-left font-semibold">Resolved</th>
+                <th className="px-2 py-2 text-right font-semibold">Elapsed</th>
+                <th className="w-8" />
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {withDuration.length === 0 && <tr><td colSpan="7"><Empty>No swarm events logged.</Empty></td></tr>}
+              {withDuration.map((s) => (
+                <tr key={s.id} className="group hover:bg-slate-50">
+                  <td className="px-3 py-1.5">
+                    <span className="num text-[12px] font-semibold text-slate-600">
+                      <Editable value={s.storyRef} onChange={(v) => setSwarms((all) => upd(all, s.id, { storyRef: v }))} className="px-1" placeholder="S-000" />
+                    </span>
+                  </td>
+                  <td className="px-2 py-1.5 text-slate-600">
+                    <Editable value={s.note} onChange={(v) => setSwarms((all) => upd(all, s.id, { note: v }))} className="px-1" placeholder="what the swarm was about" />
+                  </td>
+                  <td className="px-2 py-1.5 text-right">
+                    <NumField value={s.people} min={1} width="w-16" onChange={(v) => setSwarms((all) => upd(all, s.id, { people: Math.max(1, v) }))} />
+                  </td>
+                  <td className="px-2 py-1.5">
+                    <input type="datetime-local" value={s.startedAt} onChange={(e) => setSwarms((all) => upd(all, s.id, { startedAt: e.target.value }))} className={inputCls + ' num py-0.5 text-[12px]'} />
+                  </td>
+                  <td className="px-2 py-1.5">
+                    <input type="datetime-local" value={s.resolvedAt} onChange={(e) => setSwarms((all) => upd(all, s.id, { resolvedAt: e.target.value }))} className={inputCls + ' num py-0.5 text-[12px]'} />
+                  </td>
+                  <td className="px-2 py-1.5 text-right">
+                    <Chip tone={s.hours <= 0 ? 'slate' : s.hours < 8 ? 'green' : s.hours < 24 ? 'amber' : 'red'}>
+                      <span className="num">{s.hours > 0 ? durationLabel(s.hours) : '—'}</span>
+                    </Chip>
+                  </td>
+                  <td className="pr-2 text-right">
+                    <span className="opacity-0 transition group-hover:opacity-100">
+                      <XBtn onClick={() => setSwarms((all) => rm(all, s.id))} />
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="no-print flex flex-wrap items-center gap-2 border-t border-slate-100 bg-slate-50 px-3 py-2">
+          <input value={draft.storyRef} onChange={(e) => setDraft({ ...draft, storyRef: e.target.value })} placeholder="Story ref, e.g. S-409" className={inputCls + ' num w-32'} />
+          <input value={draft.note} onChange={(e) => setDraft({ ...draft, note: e.target.value })} placeholder="What was swarmed" className={inputCls + ' min-w-[180px] flex-1'} />
+          <NumField value={draft.people} min={1} width="w-16" onChange={(v) => setDraft({ ...draft, people: Math.max(1, v) })} suffix="people" />
+          <input type="datetime-local" value={draft.startedAt} onChange={(e) => setDraft({ ...draft, startedAt: e.target.value })} className={inputCls + ' num'} />
+          <input type="datetime-local" value={draft.resolvedAt} onChange={(e) => setDraft({ ...draft, resolvedAt: e.target.value })} className={inputCls + ' num'} />
+          <button className={btnPrimary} onClick={addSwarm}>+ Swarm</button>
+        </div>
+      </Card>
+
+      <FootNote>
+        a check-in stores nothing but a date, a score and a count, so the anonymity holds at the data level rather than
+        by convention — but the aggregate is only as safe as the group size, and a day with two responses reveals more
+        than a day with ten. The daily average is a plain mean of whatever was submitted that day, with no weighting and
+        no correction for who did or did not respond, so a quiet day is a small sample rather than a neutral one. Swarm
+        events deliberately record a headcount and a story reference and never a roster; elapsed time is wall-clock
+        between the two timestamps, so an overnight swarm includes the hours nobody was working.
+      </FootNote>
+    </div>
+  );
+}
+
+/* ==========================================================================
+   SHELL — vertical nav on the left, content to the right.
+   Desktop: 240px sidebar, collapsible to icons. Narrow: hamburger drawer.
+   ========================================================================== */
+
+const ICON_PATHS = {
+  retro: <><path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 9 9 0 0 1-3.3-.6L3 21l1.8-4.8A8.4 8.4 0 0 1 12 3a8.4 8.4 0 0 1 9 8.5z" /><path d="M8.5 9.5h7M8.5 13h4.5" /></>,
+  dod: <><path d="M20.5 11.5V19a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2H15" /><path d="M8.5 11.5l3 3 8-8.5" /></>,
+  estimation: <><path d="M3.5 3.5v17h17" /><circle cx="8.5" cy="15.5" r="1.7" /><circle cx="13" cy="10.5" r="1.7" /><circle cx="18" cy="6.5" r="1.7" /></>,
+  evm: <><path d="M3.5 3.5v17h17" /><path d="M7 15.5l3.5-4.5 3.5 2.5 4.5-6.5" /><path d="M18.5 7v3.5h-3.5" /></>,
+  cfd: <><path d="M12 2.5l9 4.5-9 4.5-9-4.5 9-4.5z" /><path d="M3 12l9 4.5 9-4.5" /><path d="M3 16.5l9 4.5 9-4.5" /></>,
+  health: <><path d="M3 12.5h3.8L9 7.5l3.2 9.5 2.3-4.5H21" /></>,
+};
+
+const TOOL_PATHS = {
+  print: <><path d="M7 9V3.5h10V9" /><rect x="3.5" y="9" width="17" height="7.5" rx="1.5" /><path d="M7 14h10v6.5H7z" /></>,
+  download: <><path d="M12 3.5v11" /><path d="M8 11l4 3.5 3.5-3.5" /><path d="M4 16.5v2.5a1.5 1.5 0 0 0 1.5 1.5h13a1.5 1.5 0 0 0 1.5-1.5v-2.5" /></>,
+  upload: <><path d="M12 14.5v-11" /><path d="M8 7l4-3.5L15.5 7" /><path d="M4 16.5v2.5a1.5 1.5 0 0 0 1.5 1.5h13a1.5 1.5 0 0 0 1.5-1.5v-2.5" /></>,
+};
+
+function ToolIcon({ name }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" className="h-[15px] w-[15px] shrink-0">
+      {TOOL_PATHS[name]}
+    </svg>
+  );
+}
+
+function NavIcon({ name }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" className="h-[18px] w-[18px] shrink-0">
+      {ICON_PATHS[name]}
+    </svg>
+  );
+}
+
+const NAV = [
+  { id: 'retro', label: 'Retrospective', hint: 'Boards, votes, recurring actions' },
+  { id: 'dod', label: 'Definition of Done', hint: 'Criteria and closure compliance' },
+  { id: 'estimation', label: 'Estimation Accuracy', hint: 'Points vs. measured cycle time' },
+  { id: 'evm', label: 'Hybrid EVM', hint: 'CPI and SPI from entered figures' },
+  { id: 'cfd', label: 'Cumulative Flow', hint: 'Bottleneck finder & constraint' },
+  { id: 'health', label: 'Team Health Check-in', hint: 'Anonymous sentiment and swarms' },
+];
+
+function NavList({ tab, onPick, collapsed }) {
+  return (
+    <nav className="flex-1 space-y-1 overflow-y-auto px-2 py-3">
+      {NAV.map((n, i) => {
+        const active = tab === n.id;
+        return (
+          <button
+            key={n.id}
+            onClick={() => onPick(n.id)}
+            title={collapsed ? n.label : n.hint}
+            className={
+              'group flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] transition ' +
+              (active
+                ? 'bg-teal-600 text-white shadow-sm'
+                : 'text-slate-300 hover:bg-slate-800 hover:text-white')
+            }
+          >
+            <span className={active ? 'text-white' : 'text-slate-400 group-hover:text-teal-300'}>
+              <NavIcon name={n.id} />
+            </span>
+            {!collapsed && (
+              <span className="min-w-0 flex-1">
+                <span className="block truncate font-medium">{n.label}</span>
+                <span className={'block truncate text-[11px] ' + (active ? 'text-teal-100' : 'text-slate-500')}>{n.hint}</span>
+              </span>
+            )}
+            {!collapsed && <span className={'num text-[10px] ' + (active ? 'text-teal-200' : 'text-slate-600')}>{i + 1}</span>}
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
+
+function Brand({ collapsed }) {
+  return (
+    <div className={'flex items-center gap-2.5 border-b border-slate-800 px-3 ' + (collapsed ? 'justify-center py-4' : 'py-4')}>
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-teal-500/15 text-teal-300 ring-1 ring-teal-500/30">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
+          <path d="M3 13.5h3.6L9 8l3.2 8 2.4-5.2H21" />
+        </svg>
+      </span>
+      {!collapsed && (
+        <span className="min-w-0">
+          <span className="block text-[14px] font-bold leading-tight tracking-tight text-white">Sprint Health</span>
+          <span className="block text-[11px] font-medium uppercase tracking-[0.14em] text-teal-400">&amp; Governance</span>
+        </span>
+      )}
+    </div>
+  );
+}
+
+function Toast({ message }) {
+  if (!message) return null;
+  return (
+    <div className="no-print pointer-events-none fixed bottom-5 left-1/2 z-50 -translate-x-1/2">
+      <div className="rounded-lg bg-slate-900 px-4 py-2 text-[13px] font-medium text-white shadow-lg">{message}</div>
+    </div>
+  );
+}
+
+function App() {
+  const [tab, setTab] = useState('retro');
+  const [collapsed, setCollapsed] = useState(false);
+  const [drawer, setDrawer] = useState(false);
+  const [toast, setToast] = useState('');
+  const toastTimer = React.useRef(null);
+  const fileRef = React.useRef(null);
+
+  /* every tab's state lives here — nothing is persisted, reload resets it all */
+  const [retroSprints, setRetroSprints] = useState(SEED_RETRO);
+  const [dodCriteria, setDodCriteria] = useState(SEED_DOD_CRITERIA);
+  const [dodStories, setDodStories] = useState(SEED_DOD_STORIES);
+  const [estSprints, setEstSprints] = useState(SEED_EST_SPRINTS);
+  const [estStories, setEstStories] = useState(SEED_EST_STORIES);
+  const [evmRows, setEvmRows] = useState(SEED_EVM);
+  const [columns, setColumns] = useState(SEED_COLUMNS);
+  const [flowStories, setFlowStories] = useState(SEED_FLOW_STORIES);
+  const [sprintStart, setSprintStart] = useState(ago(13));
+  const [sentiment, setSentiment] = useState(SEED_SENTIMENT);
+  const [swarms, setSwarms] = useState(SEED_SWARMS);
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') setDrawer(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  const pick = (id) => { setTab(id); setDrawer(false); };
+  const current = NAV.find((n) => n.id === tab) || NAV[0];
+
+  const say = (msg) => {
+    setToast(msg);
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(''), 2600);
+  };
+
+  /* ---------- print / backup / restore ---------- */
+
+  /** Everything the six tabs hold, in one serialisable object. */
+  const snapshot = () => ({
+    app: 'sprint-health-governance-dashboard',
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    activeTab: tab,
+    data: {
+      retroSprints, dodCriteria, dodStories, estSprints, estStories,
+      evmRows, columns, flowStories, sprintStart, sentiment, swarms,
+    },
+  });
+
+  const doBackup = () => {
+    const blob = new Blob([JSON.stringify(snapshot(), null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'sprint-health-backup-' + TODAY_ISO + '.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    say('Backup downloaded');
+  };
+
+  const onRestoreFile = (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      let parsed;
+      try { parsed = JSON.parse(reader.result); }
+      catch (err) { window.alert('That file could not be read as JSON.'); return; }
+
+      const d = parsed && parsed.data ? parsed.data : parsed;
+      const looksRight = d && typeof d === 'object' &&
+        (Array.isArray(d.retroSprints) || Array.isArray(d.dodStories) || Array.isArray(d.evmRows));
+      if (!looksRight) {
+        window.alert('That file is not a Sprint Health & Governance backup.');
+        return;
+      }
+      if (!window.confirm('Restore this backup? Everything currently on screen will be replaced.')) return;
+
+      /* Restore each section only if the backup carries a usable value, so an
+         older or partial file loads what it can instead of failing outright. */
+      let restored = 0;
+      const putList = (val, setter) => { if (Array.isArray(val)) { setter(val); restored++; } };
+      putList(d.retroSprints, setRetroSprints);
+      putList(d.dodCriteria, setDodCriteria);
+      putList(d.dodStories, setDodStories);
+      putList(d.estSprints, setEstSprints);
+      putList(d.estStories, setEstStories);
+      putList(d.evmRows, setEvmRows);
+      putList(d.columns, setColumns);
+      putList(d.flowStories, setFlowStories);
+      putList(d.sentiment, setSentiment);
+      putList(d.swarms, setSwarms);
+      if (typeof d.sprintStart === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d.sprintStart)) {
+        setSprintStart(d.sprintStart);
+        restored++;
+      }
+      if (parsed.activeTab && NAV.some((n) => n.id === parsed.activeTab)) setTab(parsed.activeTab);
+
+      say('Backup restored — ' + restored + ' section' + (restored === 1 ? '' : 's'));
+    };
+    reader.readAsText(f);
+  };
+
+  const body = (
+    <>
+      {tab === 'retro' && <RetrospectiveTab sprints={retroSprints} setSprints={setRetroSprints} />}
+      {tab === 'dod' && (
+        <DefinitionOfDoneTab
+          criteria={dodCriteria} setCriteria={setDodCriteria}
+          stories={dodStories} setStories={setDodStories}
+        />
+      )}
+      {tab === 'estimation' && (
+        <EstimationAccuracyTab
+          sprints={estSprints} setSprints={setEstSprints}
+          stories={estStories} setStories={setEstStories}
+        />
+      )}
+      {tab === 'evm' && <HybridEvmTab rows={evmRows} setRows={setEvmRows} />}
+      {tab === 'cfd' && (
+        <CumulativeFlowTab
+          columns={columns} setColumns={setColumns}
+          stories={flowStories} setStories={setFlowStories}
+          sprintStart={sprintStart} setSprintStart={setSprintStart}
+        />
+      )}
+      {tab === 'health' && (
+        <TeamHealthTab sentiment={sentiment} setSentiment={setSentiment} swarms={swarms} setSwarms={setSwarms} />
+      )}
+    </>
+  );
+
+  return (
+    <div className="flex min-h-screen bg-slate-100">
+      {/* desktop sidebar */}
+      <aside
+        className={
+          'no-print sticky top-0 hidden h-screen shrink-0 flex-col border-r border-slate-800 bg-slate-900 transition-[width] duration-200 lg:flex ' +
+          (collapsed ? 'w-[72px]' : 'w-60')
+        }
+      >
+        <Brand collapsed={collapsed} />
+        <NavList tab={tab} onPick={pick} collapsed={collapsed} />
+        <div className="border-t border-slate-800 px-2 py-2">
+          <button
+            onClick={() => setCollapsed((v) => !v)}
+            className="flex w-full items-center justify-center gap-2 rounded-md px-2 py-1.5 text-[11px] font-medium text-slate-400 hover:bg-slate-800 hover:text-white"
+            title={collapsed ? 'Expand the menu' : 'Collapse to icons'}
+          >
+            <span className="text-[13px] leading-none">{collapsed ? '»' : '«'}</span>
+            {!collapsed && <span>Collapse menu</span>}
+          </button>
+          {!collapsed && (
+            <p className="px-2 pb-1 pt-2 text-[10px] leading-relaxed text-slate-600">
+              Nothing is saved — a reload restores the samples. Use Backup to keep your work.
+            </p>
+          )}
+        </div>
+      </aside>
+
+      {/* mobile drawer */}
+      {drawer && (
+        <div className="no-print fixed inset-0 z-40 lg:hidden">
+          <div className="absolute inset-0 bg-slate-900/50" onClick={() => setDrawer(false)} />
+          <aside className="absolute inset-y-0 left-0 flex w-64 flex-col bg-slate-900 shadow-xl">
+            <div className="flex items-center justify-between border-b border-slate-800 pr-2">
+              <div className="flex-1"><Brand collapsed={false} /></div>
+              <button onClick={() => setDrawer(false)} className="rounded p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white" title="Close menu">
+                &#10005;
+              </button>
+            </div>
+            <NavList tab={tab} onPick={pick} collapsed={false} />
+            <p className="border-t border-slate-800 px-4 py-3 text-[10px] leading-relaxed text-slate-600">
+              Nothing is saved — a reload restores the samples. Use Backup to keep your work.
+            </p>
+          </aside>
+        </div>
+      )}
+
+      <div className="flex min-w-0 flex-1 flex-col">
+        {/* top bar — hamburger and page name on narrow screens, tools on every screen */}
+        <header className="no-print sticky top-0 z-30 flex items-center gap-3 border-b border-slate-200 bg-white/95 px-3 py-2.5 backdrop-blur sm:px-4 lg:px-8">
+          <button
+            onClick={() => setDrawer(true)}
+            className="rounded-md border border-slate-300 px-2.5 py-1.5 text-slate-600 hover:bg-slate-50 lg:hidden"
+            title="Open the menu"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" className="h-4 w-4">
+              <path d="M4 7h16M4 12h16M4 17h16" />
+            </svg>
+          </button>
+
+          <div className="min-w-0 lg:hidden">
+            <div className="truncate text-[13px] font-semibold text-slate-800">{current.label}</div>
+            <div className="truncate text-[11px] text-slate-400">Sprint Health &amp; Governance</div>
+          </div>
+
+          <div className="hidden min-w-0 lg:block">
+            <div className="truncate text-[12px] font-medium text-slate-500">
+              Nothing here is saved to this browser — <span className="text-slate-700">Backup</span> writes a JSON file you can
+              restore later or on another machine.
+            </div>
+          </div>
+
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            <button className={toolBtnCls} onClick={() => window.print()} title="Print the open tab, or save it as a PDF">
+              <ToolIcon name="print" /><span className="hidden sm:inline">Print</span>
+            </button>
+            <button className={toolBtnCls} onClick={doBackup} title="Download every tab's data as a JSON file">
+              <ToolIcon name="download" /><span className="hidden sm:inline">Backup</span>
+            </button>
+            <button className={toolBtnCls} onClick={() => fileRef.current && fileRef.current.click()} title="Replace everything on screen from a backup file">
+              <ToolIcon name="upload" /><span className="hidden sm:inline">Restore</span>
+            </button>
+            <input ref={fileRef} type="file" accept=".json,application/json" onChange={onRestoreFile} className="hidden" />
+          </div>
+        </header>
+
+        <main className="min-w-0 flex-1 px-4 py-5 sm:px-6 lg:px-8 lg:py-7">
+          <div className="mx-auto max-w-[1180px]">
+            <div className="print-only mb-5 border-b border-slate-300 pb-2">
+              <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                Sprint Health &amp; Governance
+              </div>
+              <div className="text-lg font-bold text-slate-900">{current.label}</div>
+              <div className="text-[11px] text-slate-500">Printed {shortDate(TODAY_ISO)}</div>
+            </div>
+            {body}
+          </div>
+        </main>
+      </div>
+
+      <Toast message={toast} />
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
